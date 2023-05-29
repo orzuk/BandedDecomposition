@@ -7,7 +7,7 @@ The optimal investment policy and the value attained are obtained by a banded ma
 The repository accompanies the paper [1]. Please cite this paper if you're using the package. 
 
 ## Installation
-clone the repository into a directory of your choice, and start an R session within this directory. 
+Clone the repository into a directory of your choice, and start an R session within this directory. 
 Change the main path using 'setwd' to the path where the repository is located in your computer. 
 
 ## Usage example 
