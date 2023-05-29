@@ -1,4 +1,4 @@
-# BandedDecomposition
+# Banded Decomposition
 Matrix decomposition for investing with delay in assets with price following Gaussian processes
 
 This repository contains R code used to calculate the value of an investor following an optimal policy with delay, 
