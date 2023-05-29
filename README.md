@@ -21,5 +21,5 @@ For any questions, please contact Yan Dolinsky (yan.dolinsky@mail.huji.ac.il) or
 
 ### Ref
 [1] Exponential Utility Maximization Problem in a Discrete Time Gaussian Framework <br>
-Y. Dolinsky and O. Zuk, arxiv (2023)<br>
+Y. Dolinsky and O. Zuk, arXiv (2023)<br>
  
