@@ -6,7 +6,7 @@ source("BandedDecomposition.R")
 
 
 ##########Plots for paper: log-scale
-# Plot for Simple Toeplitz
+# Plot for Simple KacMurdockSzego Matrix:
 k <- 6
 n <- 2**k
 D.vec <- pmin(c(0, 2**(0:(k))), n)
@@ -17,6 +17,7 @@ plot_protfolio_value('KacMurdockSzego', rho.vec, rep(0, n), D.vec, "by.rho", for
 dev.off()
 
 
+# Plot for Fractional Brownian Motion: 
 jpeg(file="FracBrownMotion_H_log.jpg", width = 400, height = 300, units='mm', res = 600)
 res = 100
 H.vec <- c(0.001, 1:(res-2),res)/(res)
