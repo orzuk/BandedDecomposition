@@ -5,7 +5,7 @@ library(Matrix)
 library(ltsa)
 
 # Change path to project's directory 
-# setwd("G://My Drive/BandedDecomposition") 
+# setwd("C://Code//Github//BandedDecomposition") # Change to your local path
 
 # Check if a matrix is Toeplitz
 # Input: 
