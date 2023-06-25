@@ -7,7 +7,6 @@ library(ltsa)
 # Change path to project's directory 
 # setwd("G://My Drive/BandedDecomposition") 
 
-
 # Check if a matrix is Toeplitz
 # Input: 
 # A - square n*n matrix
@@ -28,6 +27,20 @@ is_toeplitz <- function(A, epsilon=0)
   return(TRUE)
 }
 
+# return the log of the determinant (useful to avoid over/under-flows for small/large matrices)
+# For negative matrices 
+logdet <- function(A)
+{
+#  return( sum(log(eigen(A)$values)) )  # use eigenvalues
+#  mu = max(A)
+#  log(det(A / mu)) + 
+  mu =  max(abs(A)) 
+  d = det(A / max(abs(A)))
+  
+  return( list(logdet=log(abs(d)) + dim(A)[1]*log(mu), signdet=sign(d)  ))
+}
+  
+
 
 # Decompose A^-1 as A^-1 = Q + Gamma
 # Input: 
@@ -37,7 +50,7 @@ is_toeplitz <- function(A, epsilon=0)
 # Q - a matrix such that Q^{-1}_{ij}=A^{-1}_{ij} for |i-j}<=H, and that Q^{-1} is D-banded
 # Gamma - = A^{-1}-Q^{-1}, an 'anti' D-banded matrix
 banded_decomposition <- function(A, D) {
-
+  n = dim(A)[1]
   if(is_toeplitz(A))  # Faster trench inverse 
     AInv = TrenchInverse(A)
   else
@@ -55,9 +68,25 @@ banded_decomposition <- function(A, D) {
           inds <- (i+1):(i+D)
           for(j in 1:D)
             Q[i, i+m] <- Q[i, i+m] + (-1)**j * Q[i,i+j] * det( matrix(Q[inds , c(  inds[inds != i+j], i+m )], nrow=D))
-          # compute minor 
-          Q[i, i+m] <- (-1)**(D) * Q[i, i+m] /  det(matrix(Q[ inds , inds ], nrow=D)) # symmetric
-          Q[i+m, i] <- Q[i, i+m]
+          Q[i, i+m] <- (-1)**(D) * Q[i, i+m] /  det(matrix(Q[ inds , inds ], nrow=D)) # compute minor 
+          Q[i+m, i] <- Q[i, i+m]  # symmetric
+          
+          if(is.na(Q[i, i+m]) | is.infinite(Q[i, i+m]))  # problem! underflow/overflow
+          {
+            logdet.vec <- rep(0, D)
+            signdet.vec <- rep(0, D)
+            for(j in 1:D)
+            {
+              ld <- logdet( matrix(Q[inds , c(  inds[inds != i+j], i+m )], nrow=D) )
+              logdet.vec[j] <- ld$logdet
+              signdet.vec[j] <- ld$signdet
+            }
+            denom <-  logdet(matrix(Q[ inds , inds ], nrow=D))
+            Q[i, i+m] <- sum(Q[i, (i+1):(i+D)] * (-1)**(1:D) * signdet.vec * exp(logdet.vec - denom$logdet)) * denom$signdet * (-1)**D
+            if(is.na(Q[i, i+m]))
+              return(9)
+            Q[i+m, i] <- Q[i, i+m]  # symmetric
+          }
         }
   }
   Gamma = AInv-Q  
@@ -86,13 +115,7 @@ protfolio_value <- function(A, mu, D)
   }
   BD <- banded_decomposition(A, D)
   if( (det(A)==0) || is.infinite(det(BD$QInv)) ) # singularities
-  {
-    return(-exp(-0.5*mu %*% A %*% mu) / sqrt(   exp(sum(log(eigen(BD$QInv)$values))+sum(log(eigen(A)$values))) ))
-#    if(D < dim(A)[1]) # Full correlations
-#      return(0)
-#    else
-#      return( -exp(-0.5*mu %*% A %*% mu) )
-  }
+    return(-exp(-0.5*mu %*% A %*% mu) / sqrt(   exp( logdet(BD$QInv)$logdet+logdet(A)$logdet ) ))
   return( -exp(-0.5*mu %*% A %*% mu) / sqrt(det(BD$QInv) * det(A))   ) # no transpose of mu in R
 }
 
@@ -269,5 +292,20 @@ get_color_vec <- function(col1 = "red", col2 = "blue", num.c=5)
     ret.c.col.vec[k] <- rgb(c.col.vec[k,1], c.col.vec[k,2], c.col.vec[k,3])
   }
   return(ret.c.col.vec)
+}
+
+# Plot a matrix as a heatmap with colormap 
+heatmap_ggplot <- function(A)
+{
+  WD <- A %>% as.data.frame() %>%
+    rownames_to_column("rows") %>%
+    pivot_longer(-c(rows), names_to = "cols", values_to = "counts") 
+    
+    WD$rows <- as.integer(WD$rows)    
+    WD$cols <- as.integer(gsub("V", "", WD$cols))
+    
+    WD %>% ggplot(aes(x=cols, y=rows, fill=counts)) + 
+    geom_raster() + 
+    scale_fill_continuous()
 }
 
