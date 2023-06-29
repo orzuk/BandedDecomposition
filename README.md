@@ -20,6 +20,6 @@ For any questions, please contact Yan Dolinsky (yan.dolinsky@mail.huji.ac.il) or
 
 
 ### Ref
-[1] Exponential Utility Maximization in a Discrete Time Gaussian Framework <br>
+[1] [Exponential Utility Maximization in a Discrete Time Gaussian Framework](https://arxiv.org/abs/2305.18136) <br>
 Y. Dolinsky and O. Zuk, arXiv (2023)<br>
  
