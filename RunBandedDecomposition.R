@@ -1,7 +1,7 @@
 # Banded decomposition 
 library(gplots)
 library(latex2exp)
-library(time)
+library(tictoc)   # 'time' package was cancelled 
 # setwd("G://My Drive/BandedDecomposition") 
 setwd("C://Code//Github//BandedDecomposition") # Change to your local path
 source("BandedDecomposition.R")
