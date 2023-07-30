@@ -7,160 +7,25 @@ library(ltsa)
 setwd("C://Code//Github//BandedDecomposition") # Change to your local path
 
 source("BandedDecomposition.R")
-
-
-# Off-Diagonal 1 -> a
-# Diagonal x -> 1 + a
-# find
-# Input: 
-# a - constant
-# n - matrix size 
-# D - delay 
-# Diagonal 1+a, off-diagonal a
-# Output: 
-# Q - Symmetric D-banded matrix 
-# QInv - Symmetric Toeplitz matrix such that Q*QInv = I_n
-# t.vec - vector for Toeplitz matrix QInv such that QInv_{ij} = t.vec_{|i-j|}
-const_plus_I_to_Q_recursive <- function(a, n, D)
-{
-  # Matrix Q^-1 (Toeplitz)
-  t.vec = c(1+a, rep(a, D), rep(0, n-D-1))
-  if(D+1<n)
-    for(i in min(D+2):n)
-      t.vec[i] = sum(t.vec[(i-D):(i-1)]) /  (D+1/a)    
-  QInv = toeplitz(t.vec)
-  
-  # Matrix Q (D-banded)
-  Q = matrix(0, nrow=n, ncol=n)
-  Q[1,1] <- (a*D+1)/(a*D+1+a)
-  Q[2:(D+1),1] <- Q[1,2:(D+1)] <- Q[1,1]-1
-  for(i in 1:(n-1))
-    for(j in 1:(n-1)) #     for(j in max(1,i-D):min(n-1,i+D))
-      Q[i+1,j+1] = Q[i,j] + ((max(i,j)<=D)-(min(i,j)>=(n-D))) *  a**2/((a*D+1)*(a*D+1+a))
-  Q.sum = (n+a*D*(D+1)) / ((a*D+1)*(a*D+1+a))
-  return(list(QInv=QInv, Q=Q, t.vec=t.vec, Q.sum=Q.sum))  
-}
-
-# Solve Qudaratic equation to get the value a 
-# Input: 
-# sigma2 - investor's variance
-# n - number of steps
-# D - delay 
-# Output: 
-# a - constant such that the matrix I_n + a 1^n satisfies ... 
-# (return both roots, take first)
-sigma2_to_a <- function(sigma2, n, D)
-{
-  if(n < 0) # limit n-> infinity 
-    return( ( sqrt(1+4*D*(D+1)/sigma2) - 2*D-1 ) / (2*D*(D+1))      )
-  a = n*sigma2*D*(D+1)
-  b = n*sigma2*(2*D+1)-D*(D+1)
-  c = n*(sigma2-1)
-  Delta = sqrt(b**2 - 4*a*c)
-  
-  return( c((-b + Delta)/(2*a), (-b - Delta)/(2*a))  )
-}
-
-
-
-#detQlim <- 2*log(2*(D+1) / (sqrt(sigma2) + sqrt(sigma2+4*D*(D+1)))   )
-
-
-# lim n-> infty of value when we take D_n = d*n, and have a fixed 0<d<1
-# 
-option_invest_value_prop_lim <- function(sigma2, d)
-{
-  an.lim = ( d-2*sigma2+sqrt(d*d+4*sigma2*(1-d)) ) / (2*sigma2*d)   # NEED TO CHANGE !!! constant such that a_n * n -> an.lim
-  Qlog.det.lim <- an.lim * (1-d) / (1+an.lim*d) + log(1+an.lim*d)  # here we do not divide by n !!! 
-  return( 0.5*(Qlog.det.lim - an.lim * sigma2)) # value of investment 
-}
-
-n=20
-
-# Should be positive: 
-(1+(n*d+1)*an.lim/n)**(n*(1-d)) / (1+(n*d)*an.lim/n)**(n*(1-d)-1)
-(1+(n*d+1)*an.lim/n)**(n*(1-d)) / (1+(n*d)*an.lim/n)**(n*(1-d))
-
-
-(1 + an.lim / ((1+an.lim*d)*n))**(n*(1-d))
-
-
-
-
-
-  
-# Get the value at the limit
-option_invest_value <- function(sigma2, n, D)
-{
-  if(n < 0)  # limit 
-  {
-    a = sigma2_to_a(sigma2, n, D)
-    Qlog.det <- Q_log_det(sigma2, n, D)$logdetQ.vec
-    val <- -0.5*(a*sigma2 - Qlog.det)
-  } else
-  {
-    val = c()
-    Qlog.det = c()
-  }
-  return(list(Qlog.det=Qlog.det, val=val))
-}
-
-
-# Compute the log-determinant of an n*n D-banded Toeplitz matrix
-# Input: 
-# A - square n*n matrix
-# epsilon - tolerance
-#
-banded_toeplitz_to_log_det <- function(c, n)
-{
-  return( logdet(toeplitz(  c(c, rep(0, n-length(c))) ))     )
-}
-
-# Compute the normalized log-determinant for different values of n.
-# Should we also change a? probably yes !!! 
-#
-Q_log_det <- function(sigma2, n.vec, D.vec)
-{
-  num.n <- length(n.vec)
-  max.n <- max(n.vec)
-  logdetQ.vec <- rep(0, num.n)
-  a.vec <-  rep(0, num.n)
-  for(i in 1:num.n)
-  {
-    if(length(D.vec)==1)
-      D=D.vec
-    else
-      D=D.vec[i]
-    a.vec[i] <- sigma2_to_a(sigma2, n.vec[i], D)[1]
-    if(n.vec[i] < 0) # Give limit as n->infinity
-      logdetQ.vec <- 2*log(2*(D+1) / (sqrt(sigma2) + sqrt(sigma2+4*D*(D+1)))   )
-    else
-    {
-      b <- const_plus_I_to_Q_recursive(a.vec[i], n.vec[i], D) # compute large matrix 
-      logdetQ.vec[i] <- logdet(b$QInv)$logdet / n.vec[i]
-    }
-    #    print(a.vec[i])
-#    print(logdetQ.vec[i])
-  }
-  return(list(logdetQ.vec=logdetQ.vec, a.vec=a.vec))
-}
-
-# Alternative: Use Szego's Theorem. Take the negative ones too? (symmetric!)
-finite_fourier <- function(x, c)
-{
-  s <- rep(0, length(x))
-  for(k in 1:length(c))
-    s <- s + cos(k*x)  #      exp(2*pi*1i*k*x)
-  return(  Re(log(s)))
-}
+source("SemiStatic.R")
 
 
 
 
 ################################################################
-########### End Code of Functions ##############################
-################################################################
-########### Start Running Functions ############################
+# FIGURE: Compute and plot strategy 
+sigma2 = 0.5
+d = 0.2
+
+a.vec = plot_gamma_weights(sigma2, d, 
+                           fig.file = paste0("strategy_d_", as.character(d), "_sigma2_", as.character(sigma2), ".jpg"))
+
+d=0.2
+sigma2 = 2
+a.vec = plot_gamma_weights(sigma2, d, 
+                           fig.file = paste0("strategy_d_", as.character(d), "_sigma2_", as.character(sigma2), ".jpg"))
+
+
 ################################################################
 
 #integrate(finite_fourier, 0, 1, c=c(1:3))
@@ -202,7 +67,7 @@ for(sigma2 in c(2, 0.5))
     
     exact <- Q_log_det(sigma2, n.vec, D)
     alim <- sigma2_to_a(sigma2, -1, D)
-#    detQlim <- log(4) + 2*log(D+1) - log(sigma2) - 2*log( sqrt(1+4*D*(D+1)/sigma2) +1  )
+    #    detQlim <- log(4) + 2*log(D+1) - log(sigma2) - 2*log( sqrt(1+4*D*(D+1)/sigma2) +1  )
     detQlim <- 2*log(2*(D+1) / (sqrt(sigma2) + sqrt(sigma2+4*D*(D+1)))   )
     
     if(i==1)
@@ -246,7 +111,7 @@ for(i in 1:num.D)
          ylim = y.lim) # , main="log(|Q|)/n vs. n: exact vs limit")
   else
     lines(log(sigma.vec), DetQlim.vec, type="l", lwd=1.5, col=col.vec[i], 
-           cex.lab=2, cex.axis=2, cex.main=2, cex.sub=2) # , main="log(|Q|)/n vs. n: exact vs limit")
+          cex.lab=2, cex.axis=2, cex.main=2, cex.sub=2) # , main="log(|Q|)/n vs. n: exact vs limit")
 }
 legend(-4.8, -2.8, paste0(rep("D=", num.D), as.character(D.vec)),
        col=col.vec[1:num.D],  lty=rep(1, num.D), lwd=2,
@@ -263,18 +128,18 @@ num.sigma <- length(sigma.vec)
 y.lim <- c(-0.5,10)
 for(i in 1:num.D)
 {                                                                                                                                                                                                                                                                                                                                                                                   D = D.vec[i]
-  vallim.vec <- rep(0, num.sigma)
-  for(j in 1:num.sigma)    
-    vallim.vec[j] = option_invest_value(sigma.vec[j], -1, D)$val
+vallim.vec <- rep(0, num.sigma)
+for(j in 1:num.sigma)    
+  vallim.vec[j] = option_invest_value(sigma.vec[j], -1, D)$val
 
-  if(i==1)
-    plot(log(sigma.vec), vallim.vec, type="l", lwd=1.5, col=col.vec[i], 
-         cex.lab=2, cex.axis=2, cex.main=2, cex.sub=2, 
-         xlab=TeX("$log(sigma^2)$"), ylab = TeX("$V(D, sigma^2)$"), 
-         ylim = y.lim) # , main="log(|Q|)/n vs. n: exact vs limit")
-  else
-    lines(log(sigma.vec), vallim.vec, type="l", lwd=1.5, col=col.vec[i], 
-          cex.lab=2, cex.axis=2, cex.main=2, cex.sub=2) # , main="log(|Q|)/n vs. n: exact vs limit")
+if(i==1)
+  plot(log(sigma.vec), vallim.vec, type="l", lwd=1.5, col=col.vec[i], 
+       cex.lab=2, cex.axis=2, cex.main=2, cex.sub=2, 
+       xlab=TeX("$log(sigma^2)$"), ylab = TeX("$V(D, sigma^2)$"), 
+       ylim = y.lim) # , main="log(|Q|)/n vs. n: exact vs limit")
+else
+  lines(log(sigma.vec), vallim.vec, type="l", lwd=1.5, col=col.vec[i], 
+        cex.lab=2, cex.axis=2, cex.main=2, cex.sub=2) # , main="log(|Q|)/n vs. n: exact vs limit")
 }
 legend(-5, 10, paste0(rep("D=", num.D), as.character(D.vec)),
        col=col.vec[1:num.D],  lty=rep(1, num.D), lwd=2,
@@ -299,8 +164,8 @@ for(i in 1:num.sigma)
 z = log(1+z)
 
 colMap <- colorRampPalette(c("red","white","blue" ))(num.sigma*num.d)
-image(log(sigma.res), d.res, z, col = colMap, ylab="d", xlab=TeX("$log(sigma^2)$", 
-                                                                 main="log(1+v)"))
+image(log(sigma.res), d.res, z, col = colMap, ylab="d", xlab=TeX("$log(sigma^2)$"), 
+      main="log(1+v)")
 
 show.vals = as.character(round(seq(min(z, na.rm=TRUE), max(z, na.rm=TRUE), length.out=10), 2))
 show.inds = round(seq(1, length(colMap), length.out=10))
@@ -399,7 +264,7 @@ ld <- rep(0, num.n)
 
 for(i in 1:num.n)
   ld[i] = banded_toeplitz_to_log_det(c, n.vec[i])$logdet/n.vec[i]
-  
+
 
 plot(n.vec, ld, xlab="n", ylab="log(|Q_n|)/n")  
 print(ld[num.n])  # take limit
@@ -441,7 +306,7 @@ for(D in c(1,2))
   print(round(gamma.vec[(D+1):max.n,(D+1):max.n], 5))
 }
 
-  
+
 print(BD$QInv)
 is_toeplitz(BD$QInv, epsilon=0.0000000001)
 round(solve(BD$QInv), digits=10)
@@ -491,7 +356,7 @@ heatmap.2(QInv, Rowv=FALSE, Colv=FALSE)
 
 
 
-  
+
 
 
 
@@ -567,3 +432,11 @@ heatmap.2((abs(Q)>0.0000005)+0.0000001, Rowv=FALSE, Colv=FALSE)
 # 4n^2\sigma^2 (\sigma^2-1)(D^2-D) )}}{2n \sigma^2(D^2+D)}
 
 # (ns^2(2D+1)-D)
+
+# Check new formula for the matrix Q^-1
+a = 1.5 
+n = 5
+D = 2
+
+
+
