@@ -88,6 +88,18 @@ sigma2_to_a <- function(sigma2, n, D)
 }
 
 
+# Compute a_infty or a_inft*n at the limit
+sigma2_to_a_limit <- function(sigma2, d, prop.flag = TRUE)
+{
+  if(prop.flag)  # compute proportional limit
+    a <- (d - 2*sigma2 + sqrt(d*d + 4*sigma2*(1-d))) / (2*sigma2*d)
+  else  # take limit for fixed D=d
+    a <-(-1 - 2*d + sqrt(1 + 4*d*(d+1)/sigma2)) / (2*d*(d+1))
+    
+  return(a)
+}
+  
+  
 
 #detQlim <- 2*log(2*(D+1) / (sqrt(sigma2) + sqrt(sigma2+4*D*(D+1)))   )
 
@@ -178,6 +190,23 @@ finite_fourier <- function(x, c)
 }
 
 
+# Compute the limiting weights, i.e. the solution of the integral equation: 
+# g(t) = alpha * \int_{s=t-d}^d g(s) ds, with init conditions: g(t)=a for 0 < t < d, 
+# and where alpha = 
+limit_weights <- function(sigma2, d, t.vec)
+{
+  a.inf <- sigma2_to_a_limit(sigma2, d, prop.flag = TRUE) # get first the constant a'
+  alpha <- a.inf / (a.inf*d + 1) # proportional constant for integral 
+  
+  n.t <- length(t.vec)
+  b.vec <- rep(0, n.t)
+  
+  ind.1 <- which((t.vec >= d) & (t.vec < 2*d))
+  b.vec[ ind.1 ] = a * (alpha*d-1) * exp(alpha*(t.vec[ind.1]-d))  # already subtracted a from here!
+  
+  return(b.vec)
+}
+  
 
 # New: compute and plot the actual investment strategy in the proportional model
 # as a function of the proportional delay d and the variance sigma2
@@ -196,7 +225,7 @@ gamma_weights <- function(sigma2, d, n)
   return(gamma.vec)
 }
   
-plot_gamma_weights <- function(sigma2, d, n.vec = c(100, 1000, 10000, 100000), fig.file = c())
+plot_gamma_weights <- function(sigma2, d, n.vec = c(100, 1000, 10000), fig.file = c())
 {
   
   if(!is_empty(fig.file))
@@ -222,6 +251,12 @@ plot_gamma_weights <- function(sigma2, d, n.vec = c(100, 1000, 10000, 100000), f
     } else
       lines(t.vec, gamma.vec*(n.vec[i]), lwd=2, col=col.vec[i]) # how to normalize? by n.vec[i]?
   }
+  # new: add limiting curve !!! 
+  res = 10000
+  t.vec <- (1:res)/res
+  b.limit <- limit_weights(sigma2, d, t.vec)
+  lines(t.vec, b.limit, col="black", lwd = 3, lty=2)
+  
   add.legend = 1
   if(add.legend)
     legend(0.7, y.lim[2], paste0(rep("n=", length(n.vec)), as.character(n.vec)),

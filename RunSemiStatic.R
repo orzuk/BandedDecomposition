@@ -17,6 +17,15 @@ source("SemiStatic.R")
 sigma2 = 0.5
 d = 0.2
 
+res = 10000
+t.vec <- (1:res)/res
+b.limit <- limit_weights(sigma2, d, t.vec)
+plot(t.vec, b.limit, col="black", lwd = 3, lty=2, type="l")
+
+
+
+a.vec = plot_gamma_weights(sigma2, d, fig.file = c())
+
 a.vec = plot_gamma_weights(sigma2, d, 
                            fig.file = paste0("strategy_d_", as.character(d), "_sigma2_", as.character(sigma2), ".jpg"))
 
