@@ -113,14 +113,14 @@ option_invest_value_prop_lim <- function(sigma2, d)
   return( 0.5*(Qlog.det.lim - an.lim * sigma2)) # value of investment 
 }
 
-n=20
+#n=20
 
 # Should be positive: 
-(1+(n*d+1)*an.lim/n)**(n*(1-d)) / (1+(n*d)*an.lim/n)**(n*(1-d)-1)
-(1+(n*d+1)*an.lim/n)**(n*(1-d)) / (1+(n*d)*an.lim/n)**(n*(1-d))
+#(1+(n*d+1)*an.lim/n)**(n*(1-d)) / (1+(n*d)*an.lim/n)**(n*(1-d)-1)
+#(1+(n*d+1)*an.lim/n)**(n*(1-d)) / (1+(n*d)*an.lim/n)**(n*(1-d))
 
 
-(1 + an.lim / ((1+an.lim*d)*n))**(n*(1-d))
+#(1 + an.lim / ((1+an.lim*d)*n))**(n*(1-d))
 
 
 
@@ -202,7 +202,10 @@ limit_weights <- function(sigma2, d, t.vec)
   b.vec <- rep(0, n.t)
   
   ind.1 <- which((t.vec >= d) & (t.vec < 2*d))
-  b.vec[ ind.1 ] = a * (alpha*d-1) * exp(alpha*(t.vec[ind.1]-d))  # already subtracted a from here!
+  b.vec[ ind.1 ] = a.inf * (alpha*d-1) * exp(alpha*(t.vec[ind.1]-d))  # already subtracted a from here!
+
+  ind.2 <- which((t.vec >= 2*d) & (t.vec < 3*d))
+  b.vec[ ind.2 ] =  a.inf*(alpha*d-1) * ( 2*exp(alpha*d) + alpha*d-1 - alpha*t.vec[ind.2] ) * exp(alpha*(t.vec[ind.2]-2*d))  # already subtracted a from here!
   
   return(b.vec)
 }
