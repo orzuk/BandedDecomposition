@@ -12,7 +12,6 @@ source("SemiStatic.R")
 
 
 
-
 ################################################################
 # FIGURE: Compute and plot strategy 
 sigma2 = 0.5
@@ -21,9 +20,12 @@ d = 0.2
 res = 10000
 t.vec <- (1:res)/res
 b.limit <- limit_weights(sigma2, d, t.vec)
-plot(t.vec, b.limit, col="black", lwd = 3, lty=2, type="l")
+plot(t.vec, b.limit$b.vec, col="black", lwd = 3, lty=2, type="l", ylim=c(-5,0))
+#lines(t.vec, b.limit$b.vec2, col="red", lwd = 2, lty=1, type="l") # new lines 
 
 
+# What the integral should be (init condition)
+# d * (-2.5 * alpha + alpha / (1-alpha*d)) # THIS ISNT CONTUNIOS !!! ONLY ~-0.8. WTF? 
 
 a.vec = plot_gamma_weights(sigma2, d, fig.file = c())
 

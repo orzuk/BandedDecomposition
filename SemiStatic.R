@@ -198,16 +198,46 @@ limit_weights <- function(sigma2, d, t.vec)
   a.inf <- sigma2_to_a_limit(sigma2, d, prop.flag = TRUE) # get first the constant a'
   alpha <- a.inf / (a.inf*d + 1) # proportional constant for integral 
   
+
   n.t <- length(t.vec)
   b.vec <- rep(0, n.t)
+  # Special case: get the first few ones explicitly: 
+#  ind.1 <- which((t.vec >= d) & (t.vec < 2*d))
+#  b.vec[ ind.1 ] = -alpha * exp(alpha*(t.vec[ind.1]-d))  # already subtracted a from here!
+#  ind.2 <- which((t.vec >= 2*d) & (t.vec < 3*d))
+#  b.vec[ ind.2 ] =  alpha * ( -exp(alpha*(t.vec[ind.2]-d)) +alpha* (t.vec[ind.2]-2*d) * exp(alpha*(t.vec[ind.2]-2*d)) )  # already subtracted a from here!
+#  ind.3 <- which((t.vec >= 3*d) & (t.vec < 4*d))
+#  b.vec[ ind.3 ] =  alpha * exp( alpha*(t.vec[ind.3]-3*d) ) * 
+#    (  alpha*d*exp(alpha*d) -exp(2*alpha*d) + alpha*exp(alpha*d) * (t.vec[ind.3]-3*d)  - 0.5*alpha**2 * (t.vec[ind.3]-3*d)**2 )  # TRY NEW!
   
-  ind.1 <- which((t.vec >= d) & (t.vec < 2*d))
-  b.vec[ ind.1 ] = a.inf * (alpha*d-1) * exp(alpha*(t.vec[ind.1]-d))  # already subtracted a from here!
 
-  ind.2 <- which((t.vec >= 2*d) & (t.vec < 3*d))
-  b.vec[ ind.2 ] =  a.inf*(alpha*d-1) * ( 2*exp(alpha*d) + alpha*d-1 - alpha*t.vec[ind.2] ) * exp(alpha*(t.vec[ind.2]-2*d))  # already subtracted a from here!
-  
-  return(b.vec)
+  # new: get a general recurrence formula: 
+  max.k = ceiling(1/d) #  print(max.k)
+  b.mat <- matrix(0, nrow=max.k, ncol=max.k)
+  b.mat[1,1] = 0 # first constant function (don't include the a value)
+  for(k in 1:(max.k-1))  # apply recursion
+  {
+    for(j in 2:max.k)  # all non constants 
+      b.mat[k+1,j] = -alpha*b.mat[k,j-1]/(j-1)
+    # constant coefficient (most tricky) 
+    b.mat[k+1,1] = -alpha # 
+    for(i in 1:(k))  # these two shouldn't change anything? 
+      for(j in i:(k))
+        b.mat[k+1,1] <- b.mat[k+1,1] + exp(alpha*d)*(d**(i-1))*b.mat[k,j] * (-1)**(j-i) * factorial(j-1) / (factorial(i-1)*alpha**(j-i))
+    for(j in 0:(k-1))  # last one is zero and not needed, can take k-2 
+      b.mat[k+1,1] <-  b.mat[k+1,1] - b.mat[k, j+1] * (-1)**j * factorial(j) / alpha**(j)
+  }
+
+  # determine function : 
+#  b.vec2 <- rep(0, n.t)
+  for(k in 1:max.k)
+  {
+    ind.k <-  which((t.vec >= (k-1)*d) & (t.vec < k*d))
+    for(j in 1:k)
+      b.vec[ ind.k ] = b.vec[ind.k] + b.mat[k,j] * exp(alpha*(t.vec[ind.k]-(k-1)*d)) * ((t.vec[ind.k]-(k-1)*d)**(j-1))
+  }
+    
+  return(list(b.vec=b.vec, b.mat=b.mat))
 }
   
 
@@ -228,7 +258,7 @@ gamma_weights <- function(sigma2, d, n)
   return(gamma.vec)
 }
   
-plot_gamma_weights <- function(sigma2, d, n.vec = c(100, 1000, 10000), fig.file = c())
+plot_gamma_weights <- function(sigma2, d, n.vec = c(10, 100, 1000), fig.file = c())
 {
   
   if(!is_empty(fig.file))
@@ -237,7 +267,20 @@ plot_gamma_weights <- function(sigma2, d, n.vec = c(100, 1000, 10000), fig.file 
          width = 400, height = 300, units='mm', res = 600)
     par(mar=c(5,6,4,1)+.1)
   }
-  num.n <- length(n.vec)
+  
+  # new: add limiting curve !!! 
+  res = 10000
+  t.vec <- (1:res-1)/res
+  
+  
+  b.limit <- limit_weights(sigma2, d, t.vec)
+  y.lim <- range(b.limit$b.vec)*1.1
+  plot(t.vec, b.limit$b.vec, type="l", lwd=3.5, col="black", ylim = y.lim, lty=1,  
+       xlab="t", ylab=TeX("$kappa_t$"), cex=3, cex.axis=3, cex.lab=3, cex.main=3, 
+       main=TeX(paste0("Investment weights vs. time for $sigma^2=", as.character(sigma2), " ; d=", as.character(d), "$")))
+  
+  
+    num.n <- length(n.vec)
   a.vec <- rep(0, num.n)
   col.vec = get_color_vec(num.c=length(n.vec))
   for(i in 1:length(n.vec))
@@ -245,25 +288,21 @@ plot_gamma_weights <- function(sigma2, d, n.vec = c(100, 1000, 10000), fig.file 
     a.vec[i] <- sigma2_to_a(sigma2, n.vec[i], round(n.vec[i]*d))[1]
     gamma.vec <- gamma_weights(sigma2, d, n.vec[i])
     t.vec <- (1:n.vec[i]) / n.vec[i]
-    if(i == 1)
-    {
-      y.lim <- range(gamma.vec*(n.vec[i]))*1.1
-      plot(t.vec, gamma.vec*(n.vec[i]), type="l", lwd=2.5, col=col.vec[i], ylim = y.lim, 
-           xlab="t", ylab=TeX("$b(t)$"), cex=3, cex.axis=3, cex.lab=3, cex.main=3, 
-           main=TeX(paste0("Strategy: $sigma^2=", as.character(sigma2), " ; d=", as.character(d), "$")))
-    } else
-      lines(t.vec, gamma.vec*(n.vec[i]), lwd=2, col=col.vec[i]) # how to normalize? by n.vec[i]?
+#    if(i == 1)
+#    {
+#      y.lim <- range(gamma.vec*(n.vec[i]))*1.1
+#      plot(t.vec, gamma.vec*(n.vec[i]), type="l", lwd=2.5, col=col.vec[i], ylim = y.lim, 
+#           xlab="t", ylab=TeX("$kappa_t$"), cex=3, cex.axis=3, cex.lab=3, cex.main=3, 
+#           main=TeX(paste0("Investment weights vs. time for $sigma^2=", as.character(sigma2), " ; d=", as.character(d), "$")))
+#    } else
+    lines(t.vec, gamma.vec*(n.vec[i]), lwd=3, col=col.vec[i], lty=2) # how to normalize? by n.vec[i]?
   }
-  # new: add limiting curve !!! 
-  res = 10000
-  t.vec <- (1:res)/res
-  b.limit <- limit_weights(sigma2, d, t.vec)
-  lines(t.vec, b.limit, col="black", lwd = 3, lty=2)
+  
   
   add.legend = 1
   if(add.legend)
-    legend(0.7, y.lim[2], paste0(rep("n=", length(n.vec)), as.character(n.vec)),
-           col=col.vec,  lty=rep(1, length(n.vec)), lwd=2.5,
+    legend(0.7, y.lim[2], c("limit", paste0(rep("n=", length(n.vec)), as.character(n.vec))),
+           col=c("black", col.vec),  lty=c(1, rep(2, length(n.vec))), lwd=c(3.5, rep(3, length(n.vec))),
            cex=3, box.lwd = 0, box.col = "white", bg = "white")
   grid(col = "darkgray", lwd=1.5)
   if(!is_empty(fig.file))
