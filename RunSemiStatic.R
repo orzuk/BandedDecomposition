@@ -20,22 +20,21 @@ d = 0.2
 res = 10000
 t.vec <- (1:res)/res
 b.limit <- limit_weights(sigma2, d, t.vec)
-plot(t.vec, b.limit$b.vec, col="black", lwd = 3, lty=2, type="l", ylim=c(-5,0))
-#lines(t.vec, b.limit$b.vec2, col="red", lwd = 2, lty=1, type="l") # new lines 
+plot(t.vec, b.limit$kappa, col="black", lwd = 3, lty=2, type="l", ylim=c(-5,0))
+lines(t.vec, b.limit$kappa2, col="red", lwd = 2, lty=1, type="l") # new lines 
 
 
 # What the integral should be (init condition)
 # d * (-2.5 * alpha + alpha / (1-alpha*d)) # THIS ISNT CONTUNIOS !!! ONLY ~-0.8. WTF? 
 
-a.vec = plot_gamma_weights(sigma2, d, fig.file = c())
-
-a.vec = plot_gamma_weights(sigma2, d, 
-                           fig.file = paste0("strategy_d_", as.character(d), "_sigma2_", as.character(sigma2), ".jpg"))
-
 d=0.2
+a.vec = plot_gamma_weights(sigma2, d, fig.file = c())
+a.vec = plot_gamma_weights(sigma2, d, 
+                           fig.file = paste0("kappa_H_", as.character(d), "_sigma2_", as.character(sigma2), ".jpg"))
+
 sigma2 = 2
 a.vec = plot_gamma_weights(sigma2, d, 
-                           fig.file = paste0("strategy_d_", as.character(d), "_sigma2_", as.character(sigma2), ".jpg"))
+                           fig.file = paste0("kappa_H_", as.character(d), "_sigma2_", as.character(sigma2), ".jpg"))
 
 
 ################################################################
@@ -139,17 +138,17 @@ num.sigma <- length(sigma.vec)
 y.lim <- c(-0.5,10)
 for(i in 1:num.D)
 {                                                                                                                                                                                                                                                                                                                                                                                   D = D.vec[i]
-vallim.vec <- rep(0, num.sigma)
-for(j in 1:num.sigma)    
-  vallim.vec[j] = option_invest_value(sigma.vec[j], -1, D)$val
+  vallim.vec <- rep(0, num.sigma)
+  for(j in 1:num.sigma)    
+    vallim.vec[j] = option_invest_value(sigma.vec[j], -1, D)$val
 
-if(i==1)
-  plot(log(sigma.vec), vallim.vec, type="l", lwd=1.5, col=col.vec[i], 
+  if(i==1)
+    plot(log(sigma.vec), vallim.vec, type="l", lwd=1.5, col=col.vec[i], 
        cex.lab=2, cex.axis=2, cex.main=2, cex.sub=2, 
        xlab=TeX("$log(sigma^2)$"), ylab = TeX("$V(D, sigma^2)$"), 
        ylim = y.lim) # , main="log(|Q|)/n vs. n: exact vs limit")
-else
-  lines(log(sigma.vec), vallim.vec, type="l", lwd=1.5, col=col.vec[i], 
+  else
+    lines(log(sigma.vec), vallim.vec, type="l", lwd=1.5, col=col.vec[i], 
         cex.lab=2, cex.axis=2, cex.main=2, cex.sub=2) # , main="log(|Q|)/n vs. n: exact vs limit")
 }
 legend(-5, 10, paste0(rep("D=", num.D), as.character(D.vec)),
@@ -157,14 +156,48 @@ legend(-5, 10, paste0(rep("D=", num.D), as.character(D.vec)),
        cex=1.9, box.lwd = 0, box.col = "white", bg = "white")
 grid(col = "darkgray", lwd=1.5)
 dev.off()
+
+
+
+################################################################
+# Now plot the a of the proportional model as a function of
+# 0 < d < 1 and sigma^2
+jpeg(file=paste0("a_prop_limit.jpg"), 
+     width = 400, height = 300, units='mm', res = 600)
+d.res <- seq(0.01, 0.99, 0.01)
+num.d <- length(d.res)
+sigma.res <- exp(seq(-3, 3, 0.02)) # values of sigma2
+num.sigma <- length(sigma.res)
+
+A <- matrix(0, nrow=num.sigma, ncol=num.d)
+for(i in 1:num.sigma)
+  for(j in 1:num.d)
+  {
+    A[i,j] = sigma2_to_a_limit(sigma.res[i], d.res[j], prop.flag = TRUE)    
+    A[i,j] = A[i,j] / (1-A[i,j]*d.res[j])
+  }
+#z = log(0.0000000000001+z)
+# z = log(1+z)
+
+colMap <- colorRampPalette(c("red","white","blue" ))(num.sigma*num.d)
+image(log(sigma.res), d.res, A, col = colMap, ylab="d", xlab=TeX("$log(sigma^2)$"), 
+      main="log(1+v)")
+
+show.vals = as.character(round(seq(min(A, na.rm=TRUE), max(A, na.rm=TRUE), length.out=10), 2))
+show.inds = round(seq(1, length(colMap), length.out=10))
+legend(grconvertX(0.5, "device"), grconvertY(1, "device"),
+       show.vals, fill = colMap[show.inds], xpd = NA)
+dev.off()
+
+
 ################################################################
 # Now plot the value of the proportional model as a function of
 # 0 < d < 1 and sigma^2
 jpeg(file=paste0("val_prop_limit.jpg"), 
      width = 400, height = 300, units='mm', res = 600)
-d.res <- seq(0.01, 0.99, 0.01)
+d.res <- seq(0.005, 0.995, 0.005)
 num.d <- length(d.res)
-sigma.res <- exp(seq(-3, 3, 0.02)) # values of sigma2
+sigma.res <- exp(seq(-3, 3, 0.01)) # values of sigma2
 num.sigma <- length(sigma.res)
 
 z <- matrix(0, nrow=num.sigma, ncol=num.d)
@@ -172,17 +205,71 @@ for(i in 1:num.sigma)
   for(j in 1:num.d)
     z[i,j] = option_invest_value_prop_lim(sigma.res[i], d.res[j])    
 #z = log(0.0000000000001+z)
-z = log(1+z)
+#z = log(0.0000000001-z)
+z = -exp(z)
+#z = log(z + 1)
 
 colMap <- colorRampPalette(c("red","white","blue" ))(num.sigma*num.d)
-image(log(sigma.res), d.res, z, col = colMap, ylab="d", xlab=TeX("$log(sigma^2)$"), 
-      main="log(1+v)")
+# par(mar=c(5,6,4,1)+.1)
+par(mar=c(8,6,4,1)+.1)
+image(log(sigma.res), d.res, z, col = colMap, ylab="H", xlab="", # xlab=TeX("$log(sigma^2)$"), 
+      main="", cex=3, cex.lab=3, cex.axis=3, cex.main=3)
+
+title(xlab=TeX("$log(\\frac{\\hat{varsigma}^2}{varsigma^2})$"), line=7, cex.lab=3, family="Calibri Light")
 
 show.vals = as.character(round(seq(min(z, na.rm=TRUE), max(z, na.rm=TRUE), length.out=10), 2))
 show.inds = round(seq(1, length(colMap), length.out=10))
-legend(grconvertX(0.5, "device"), grconvertY(1, "device"),
-       show.vals, fill = colMap[show.inds], xpd = NA)
+legend(grconvertX(8200, "device"), grconvertY(550, "device"),
+       show.vals, fill = colMap[show.inds], xpd = NA, cex=2)
+#legend(grconvertX(0.5, "device"), grconvertY(10, "device"),
+#       show.vals, fill = colMap[show.inds], xpd = NA, cex=2)
 dev.off()
+
+###
+# Plot some curves when we fix either d or sigma
+plot(d.res, z[10,], type="l")
+lines(d.res, z[50,], col="red")
+lines(d.res, z[100,], col="green")
+lines(d.res, z[200,], col="blue")
+lines(d.res, z[300,], col="orange")
+
+
+plot(log(sigma.res), z[,10], type="l")
+lines(log(sigma.res), z[,30], col="red")
+lines(log(sigma.res), z[,50], col="green")
+lines(log(sigma.res), z[,70], col="blue")
+lines(log(sigma.res), z[,90], col="orange")
+###
+
+############### Plot the same as 3D surface ####################
+
+library(plot3D)
+#Meshi <- mesh(sigma.res, d.res)
+#u <- Meshi$x ; v <- Meshi$y
+#x <- log(u) # v * cos(u)
+#y <- v # * sin(u)
+#z <- 10 * u
+surf3D(x, y, z, colvar = z, colkey = TRUE, 
+       box = TRUE, bty = "b", phi = 20, theta = 120)
+Meshi <- mesh(d.res, sigma.res)
+u <- Meshi$x ; v <- Meshi$y
+x <- u # v * cos(u)
+y <- log(v) # * sin(u)
+#z <- 10 * u
+#surf3D(x, y, t(z), colvar = t(z), colkey = TRUE, 
+#       xlab = "H", ylab=TeX("$log(sigma^2)$"), zlab="U", nticks=5,
+#       box = TRUE, bty = "b", phi = 20, theta = 120)
+#surf3D(x, y, t(z), colvar = t(z), colkey = TRUE, 
+#       box = TRUE, bty = "b", phi = 20, theta = 120)
+#library(rgl)
+#rglwidget(elementId = "plot3drgl")
+
+library(plotly)
+fig <- plot_ly(x = x, y = y, z = t(z)) %>% add_surface() %>%
+  layout(scene = list(xaxis = list(title = "H"), yaxis = list(title = ""), zaxis = list(title="U"))) %>% 
+  config(mathjax = 'cdn')
+fig
+
 
 ################################################################
 # Show convergence to value for log-det 
