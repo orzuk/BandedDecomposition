@@ -1,4 +1,4 @@
-# Banded decomposition 
+# Banded decomposition figures 
 library(gplots)
 library(latex2exp)
 library(Matrix)
@@ -10,36 +10,65 @@ setwd("C://Code//Github//BandedDecomposition") # Change to your local path
 source("BandedDecomposition.R")
 source("SemiStatic.R")
 
-
-
 ################################################################
-# FIGURE: Compute and plot strategy 
-sigma2 = 0.5
-d = 0.2
-
-res = 10000
-t.vec <- (1:res)/res
-b.limit <- limit_weights(sigma2, d, t.vec)
-plot(t.vec, b.limit$kappa, col="black", lwd = 3, lty=2, type="l", ylim=c(-5,0))
-lines(t.vec, b.limit$kappa2, col="red", lwd = 2, lty=1, type="l") # new lines 
-
-
-# What the integral should be (init condition)
-# d * (-2.5 * alpha + alpha / (1-alpha*d)) # THIS ISNT CONTUNIOS !!! ONLY ~-0.8. WTF? 
-
+# FIGURE 1 : Compute and plot strategy 
 d=0.2
-a.vec = plot_gamma_weights(sigma2, d, fig.file = c())
+sigma2 = 0.5
 a.vec = plot_gamma_weights(sigma2, d, 
                            fig.file = paste0("kappa_H_", as.character(d), "_sigma2_", as.character(sigma2), ".jpg"))
-
 sigma2 = 2
 a.vec = plot_gamma_weights(sigma2, d, 
                            fig.file = paste0("kappa_H_", as.character(d), "_sigma2_", as.character(sigma2), ".jpg"))
+################################################################
 
 
 ################################################################
-#integrate(finite_fourier, 0, 1, c=c(1:3))
+# FIGURE 2 : Now plot the value of the proportional model as a function of
+# 0 < d < 1 and sigma^2
+jpeg(file=paste0("val_prop_limit.jpg"), 
+     width = 400, height = 300, units='mm', res = 600)
+d.res <- seq(0.005, 0.995, 0.005)
+num.d <- length(d.res)
+sigma.res <- exp(seq(-3, 3, 0.01)) # values of sigma2
+num.sigma <- length(sigma.res)
 
+z <- matrix(0, nrow=num.sigma, ncol=num.d)
+for(i in 1:num.sigma)
+  for(j in 1:num.d)
+    z[i,j] = option_invest_value_prop_lim(sigma.res[i], d.res[j])    
+z = -exp(z)
+
+colMap <- colorRampPalette(c("red","white","blue" ))(num.sigma*num.d)
+par(mar=c(8,6,4,1)+.1)
+image(log(sigma.res), d.res, z, col = colMap, ylab="H", xlab="", # xlab=TeX("$log(sigma^2)$"), 
+      main="", cex=3, cex.lab=3, cex.axis=3, cex.main=3)
+title(xlab=TeX("$log(\\frac{\\hat{varsigma}^2}{varsigma^2})$"), line=7, cex.lab=3, family="Calibri Light")
+
+show.vals = as.character(round(seq(min(z, na.rm=TRUE), max(z, na.rm=TRUE), length.out=10), 2))
+show.inds = round(seq(1, length(colMap), length.out=10))
+legend(grconvertX(8200, "device"), grconvertY(550, "device"),
+       show.vals, fill = colMap[show.inds], xpd = NA, cex=2)
+dev.off()
+############### Plot the same as 3D surface ####################
+library(plot3D)
+#surf3D(x, y, z, colvar = z, colkey = TRUE, 
+#       box = TRUE, bty = "b", phi = 20, theta = 120)
+Meshi <- mesh(d.res, sigma.res)
+u <- Meshi$x ; v <- Meshi$y
+x <- u # v * cos(u)
+y <- log(v) # * sin(u)
+library(plotly)
+fig <- plot_ly(x = x, y = y, z = t(z)) %>% add_surface() %>%
+  layout(scene = list(xaxis = list(title = "H"), yaxis = list(title = ""), zaxis = list(title="U"))) %>% 
+  config(mathjax = 'cdn')
+fig  # need to save manually 
+
+
+################################################################
+################################################################
+################################################################
+
+### Old/unused figures below
 
 ################################################################
 # FIGURE: Compute and plot log determinant normalized as a function of n 
@@ -189,86 +218,6 @@ legend(grconvertX(0.5, "device"), grconvertY(1, "device"),
        show.vals, fill = colMap[show.inds], xpd = NA)
 dev.off()
 
-
-################################################################
-# Now plot the value of the proportional model as a function of
-# 0 < d < 1 and sigma^2
-jpeg(file=paste0("val_prop_limit.jpg"), 
-     width = 400, height = 300, units='mm', res = 600)
-d.res <- seq(0.005, 0.995, 0.005)
-num.d <- length(d.res)
-sigma.res <- exp(seq(-3, 3, 0.01)) # values of sigma2
-num.sigma <- length(sigma.res)
-
-z <- matrix(0, nrow=num.sigma, ncol=num.d)
-for(i in 1:num.sigma)
-  for(j in 1:num.d)
-    z[i,j] = option_invest_value_prop_lim(sigma.res[i], d.res[j])    
-#z = log(0.0000000000001+z)
-#z = log(0.0000000001-z)
-z = -exp(z)
-#z = log(z + 1)
-
-colMap <- colorRampPalette(c("red","white","blue" ))(num.sigma*num.d)
-# par(mar=c(5,6,4,1)+.1)
-par(mar=c(8,6,4,1)+.1)
-image(log(sigma.res), d.res, z, col = colMap, ylab="H", xlab="", # xlab=TeX("$log(sigma^2)$"), 
-      main="", cex=3, cex.lab=3, cex.axis=3, cex.main=3)
-
-title(xlab=TeX("$log(\\frac{\\hat{varsigma}^2}{varsigma^2})$"), line=7, cex.lab=3, family="Calibri Light")
-
-show.vals = as.character(round(seq(min(z, na.rm=TRUE), max(z, na.rm=TRUE), length.out=10), 2))
-show.inds = round(seq(1, length(colMap), length.out=10))
-legend(grconvertX(8200, "device"), grconvertY(550, "device"),
-       show.vals, fill = colMap[show.inds], xpd = NA, cex=2)
-#legend(grconvertX(0.5, "device"), grconvertY(10, "device"),
-#       show.vals, fill = colMap[show.inds], xpd = NA, cex=2)
-dev.off()
-
-###
-# Plot some curves when we fix either d or sigma
-plot(d.res, z[10,], type="l")
-lines(d.res, z[50,], col="red")
-lines(d.res, z[100,], col="green")
-lines(d.res, z[200,], col="blue")
-lines(d.res, z[300,], col="orange")
-
-
-plot(log(sigma.res), z[,10], type="l")
-lines(log(sigma.res), z[,30], col="red")
-lines(log(sigma.res), z[,50], col="green")
-lines(log(sigma.res), z[,70], col="blue")
-lines(log(sigma.res), z[,90], col="orange")
-###
-
-############### Plot the same as 3D surface ####################
-
-library(plot3D)
-#Meshi <- mesh(sigma.res, d.res)
-#u <- Meshi$x ; v <- Meshi$y
-#x <- log(u) # v * cos(u)
-#y <- v # * sin(u)
-#z <- 10 * u
-surf3D(x, y, z, colvar = z, colkey = TRUE, 
-       box = TRUE, bty = "b", phi = 20, theta = 120)
-Meshi <- mesh(d.res, sigma.res)
-u <- Meshi$x ; v <- Meshi$y
-x <- u # v * cos(u)
-y <- log(v) # * sin(u)
-#z <- 10 * u
-#surf3D(x, y, t(z), colvar = t(z), colkey = TRUE, 
-#       xlab = "H", ylab=TeX("$log(sigma^2)$"), zlab="U", nticks=5,
-#       box = TRUE, bty = "b", phi = 20, theta = 120)
-#surf3D(x, y, t(z), colvar = t(z), colkey = TRUE, 
-#       box = TRUE, bty = "b", phi = 20, theta = 120)
-#library(rgl)
-#rglwidget(elementId = "plot3drgl")
-
-library(plotly)
-fig <- plot_ly(x = x, y = y, z = t(z)) %>% add_surface() %>%
-  layout(scene = list(xaxis = list(title = "H"), yaxis = list(title = ""), zaxis = list(title="U"))) %>% 
-  config(mathjax = 'cdn')
-fig
 
 
 ################################################################
@@ -535,6 +484,3 @@ heatmap.2((abs(Q)>0.0000005)+0.0000001, Rowv=FALSE, Colv=FALSE)
 a = 1.5 
 n = 5
 D = 2
-
-
-
