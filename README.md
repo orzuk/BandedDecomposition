@@ -12,7 +12,7 @@ The repository accompanies the papers [1] and [2]. Please cite these papers if y
 Clone the repository into a directory of your choice, and start an R session within this directory. 
 Change the main path using 'setwd' to the path where the repository is located in your computer. 
 
-## Usage example 
+## Usage examples 
 Run the script 'RunBandedDecomposition' to plot the value as a function of the delay and process parameters for 
 two examples (Kac-Murdock-Szego and Fractional-Brownian-Motion covariance matrices) shown in [1]. 
 
