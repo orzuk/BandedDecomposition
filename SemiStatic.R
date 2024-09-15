@@ -75,6 +75,7 @@ const_plus_I_to_Q_recursive <- function(a, n, D)
 # Output: 
 # a - constant such that the matrix I_n + a 1^n satisfies ... 
 # (return both roots, take first)
+# Remark: We always assume that the market variance sigma2-hat = 1, this is w.l.o.g. (here and in other functions)
 sigma2_to_a <- function(sigma2, n, D)
 {
   if(n < 0) # limit n-> infinity 
@@ -88,7 +89,7 @@ sigma2_to_a <- function(sigma2, n, D)
 }
 
 
-# Compute a_infty or a_inft*n at the limit
+# Compute a_infty or a_inft*n at the limit as a function of sigma2 and d
 sigma2_to_a_limit <- function(sigma2, d, prop.flag = TRUE)
 {
   if(prop.flag)  # compute proportional limit
@@ -99,6 +100,10 @@ sigma2_to_a_limit <- function(sigma2, d, prop.flag = TRUE)
   return(a)
 }
   
+sigma2_to_alpha_limit <- function(sigma2, d)
+{
+  return ( (1 - 2 / (d*sigma2 + sqrt(4*(1-d)*sigma2+d**2 * sigma2**2))) / d )
+}
   
 
 #detQlim <- 2*log(2*(D+1) / (sqrt(sigma2) + sqrt(sigma2+4*D*(D+1)))   )
@@ -201,13 +206,17 @@ finite_fourier <- function(x, c)
 
 # Compute the limiting weights, i.e. the solution of the integral equation: 
 # g(t) = alpha * \int_{s=t-d}^d g(s) ds, with init conditions: g(t)=a for 0 < t < d, 
-# and where alpha = 
-limit_weights <- function(sigma2, d, t.vec)
+# and where alpha = ?
+# Return kappa_t - kappa_0
+limit_weights <- function(sigma2, d, t.vec, old.way = TRUE)
 {
-  a.inf <- sigma2_to_a_limit(sigma2, d, prop.flag = TRUE) # get first the constant a'
-  alpha <- a.inf / (a.inf*d + 1) # proportional constant for integral 
+  if(old.way)
+  {
+    a.inf <- sigma2_to_a_limit(sigma2, d, prop.flag = TRUE) # get first the constant a'
+    alpha <- a.inf / (a.inf*d + 1) # proportional constant for integral 
+  } else
+    alpha <- sigma2_to_alpha_limit(sigma2, d)
   
-
   n.t <- length(t.vec)
   # Special case: get the first few ones explicitly: 
 #  ind.1 <- which((t.vec >= d) & (t.vec < 2*d))
@@ -289,7 +298,9 @@ gamma_weights <- function(sigma2, d, n)
 #  gamma.vec <- cumsum(gamma.vec - a)
   return(gamma.vec)
 }
-  
+
+
+# Plot the finite values and their limit kappa as a function of t for different values of n steps  
 plot_gamma_weights <- function(sigma2, d, n.vec = c(10, 100, 1000), fig.file = c())
 {
   
@@ -352,8 +363,177 @@ plot_gamma_weights <- function(sigma2, d, n.vec = c(10, 100, 1000), fig.file = c
 }  
 
 
+
+
 ################################################################
 ########### End Code of Functions ##############################
 ################################################################
+
+# Function for revision: 
+# (h.vec is a vector of h values or d values, the same)
+plot_kappa_limit_weights <- function(sigma2, h.vec, fig.file = c(), subtract.kapp0 = TRUE)
+{
+  col.vec = get_color_vec(num.c=length(h.vec))
+  if(!is_empty(fig.file))
+  {
+    jpeg(file=fig.file, 
+         width = 400, height = 300, units='mm', res = 600)
+    par(mar=c(5,8,4,1)+.1)
+  }
+  
+  alpha.h.vec <- sigma2_to_alpha_limit(sigma2, h.vec) * h.vec
+  
+  
+  res = 10000
+  t.vec <- (1:(res-1))/res
+  
+  kappa.str = "$kappa_t - \\frac{alpha}{1-alpha H}$"
+
+  for(i in 1:length(h.vec))
+  {
+    b.limit <- limit_weights(sigma2, h.vec[i], t.vec)
+    if(subtract.kapp0 == FALSE)
+    {
+      kappa.str = "$kappa_t$"
+      alpha <- sigma2_to_alpha_limit(sigma2, h.vec[i])
+      kappa0 <- alpha / (1-alpha*h.vec[i])
+      b.limit$kappa <- b.limit$kappa + kappa0
+    }
+    new.y.lim <- range(b.limit$kappa)*1.1
+    if(i == 1)
+    {
+      y.lim = new.y.lim
+    } else
+    {
+      y.lim[1] = min(y.lim[1], new.y.lim[1])
+      y.lim[2] = max(y.lim[2], new.y.lim[2])
+      
+    }
+    
+  }    
+    
+  
+  for(i in 1:length(h.vec))
+  {
+    b.limit <- limit_weights(sigma2, h.vec[i], t.vec)
+    if(subtract.kapp0 == FALSE)
+    {
+      alpha <- sigma2_to_alpha_limit(sigma2, h.vec[i])
+      kappa0 <- alpha / (1-alpha*h.vec[i])
+      b.limit$kappa <- b.limit$kappa + kappa0
+    }
+    if(i == 1)
+    {
+#      y.lim <- range(b.limit$kappa)*1.1
+      plot(t.vec[floor(h.vec[i]*res) : (res-1) ], b.limit$kappa[floor(h.vec[i]*res) : (res-1) ], lwd=4, col=col.vec[i], 
+           type="l",  ylim = y.lim, xlim = c(0,1), lty=1,  main = TeX(paste0("$sigma^2=", as.character(sigma2))), 
+           xlab="t", ylab=TeX(kappa.str), cex=3, cex.axis=3, cex.lab=3, cex.main=3) # ,  no title 
+    } else
+    {
+      lines(t.vec[floor(h.vec[i]*res) : (res-1) ], b.limit$kappa[floor(h.vec[i]*res) : (res-1) ], lwd=4, col=col.vec[i])
+    }  
+  }
+  for(i in rev(1:length(h.vec)))
+  {
+    b.limit <- limit_weights(sigma2, h.vec[i], t.vec)
+    if(subtract.kapp0 == FALSE)
+    {
+      alpha <- sigma2_to_alpha_limit(sigma2, h.vec[i])
+      kappa0 <- alpha / (1-alpha*h.vec[i])
+      b.limit$kappa <- b.limit$kappa + kappa0
+    }
+    lines(t.vec[1: floor(h.vec[i]*res-1) ], b.limit$kappa[1: floor(h.vec[i]*res-1) ], lwd=4, col=col.vec[i])
+  }
+    
+  legend.vec = paste0(rep("$H=", length(h.vec)), as.character(round(h.vec, 2)), 
+                      rep(", alpha H=", length(h.vec)),  as.character(round(alpha.h.vec, 2)), rep("$", length(h.vec)))
+  add.legend = 1
+  if(add.legend)
+    legend(0.1, (y.lim[1]+y.lim[2])/2, TeX(legend.vec),
+           col=col.vec[1:length(h.vec)],  lty=rep(1, length(h.vec)), lwd=rep(3, length(h.vec)),
+           cex=3, box.lwd = 0, box.col = "white", bg = "white")
+  
+  grid(col = "darkgray", lwd=1.5)
+  if(!is_empty(fig.file))
+    dev.off()
+  
+  return(0)
+  
+}
+
+
+plot_kappa0_limit <- function(sigma2.vec, fig.file = c(), log.flag = FALSE, plot.alphaH = FALSE)
+{
+  col.vec = get_color_vec(num.c=length(sigma2.vec))
+  if(!is_empty(fig.file))
+  {
+    if(log.flag)
+      fig.file = paste0( substring(fig.file, 1, nchar(fig.file) - 3) , "_log.jpg")
+    jpeg(file=fig.file, 
+         width = 400, height = 300, units='mm', res = 600)
+    par(mar=c(5,8,4,1)+.1)
+  }
+  
+  res = 10000
+  h.vec <- (1:(res-1))/res
+  
+  kappa0 = matrix(0, nrow = length(sigma2.vec), ncol=length(h.vec))
+  for(i in 1:length(sigma2.vec))
+  {
+    alpha <- sigma2_to_alpha_limit(sigma2.vec[i], h.vec)
+    if(plot.alphaH)
+    {
+      kappa0[i,] <- alpha*h.vec
+    } else
+      kappa0[i,] <- alpha / (1-alpha*h.vec)
+    
+  }
+  if(log.flag)
+  {
+    kappa0 = kappa0 + 1 * sign(kappa0)
+    kappa0 = log(abs(kappa0)) * sign(kappa0)
+    kappa.str = "$ \\pm  log(1+|kappa_0|)$"
+  } else
+    kappa.str = "$kappa_0 = \\frac{alpha}{1-alpha H}$"
+  if(plot.alphaH)
+  {
+    kappa.str = "$alpha H$"
+    x.lim = c(0, 1)
+  } else
+    x.lim = c(0, 0.1)
+  
+  y.lim <- range(kappa0)*1.1
+  
+  for(i in 1:length(sigma2.vec))
+  {
+    if(i == 1)
+    {
+      plot(h.vec, kappa0[i,], lwd=4, col=col.vec[i],
+           type="l",  ylim = y.lim, xlim = x.lim, lty=1,  
+           xlab="H", ylab=TeX(kappa.str), cex=3, cex.axis=3, cex.lab=3, cex.main=3) # ,  no title 
+    } else
+    {
+      lines(h.vec, kappa0[i,], lwd=4, col=col.vec[i])
+    }  
+  }
+  if(plot.alphaH)
+  {
+    legend.loc = c(0.05, y.lim[1] + (y.lim[2]-y.lim[1])*0.4)
+    for(i in 1:length(sigma2.vec))
+      abline(a = 1-1/sqrt(sigma2.vec[i]), b = 0,  col=col.vec[i], lty=2, lwd=2)
+  } else  
+    legend.loc = c(0.72*x.lim[2], y.lim[1] + (y.lim[2]-y.lim[1])*1.04)
+  
+  legend.vec = paste0(rep("$sigma^2=", length(sigma2.vec)), as.character(sigma2.vec), rep("$", length(sigma2.vec)) )
+  legend(legend.loc[1], legend.loc[2], TeX(legend.vec),
+         col=col.vec[1:length(sigma2.vec)],  lty=rep(1, length(sigma2.vec)), lwd=rep(3, length(sigma2.vec)),
+         cex=2.5, box.lwd = 0, box.col = "white", bg = "white")
+  
+  grid(col = "darkgray", lwd=1.5)
+  if(!is_empty(fig.file))
+    dev.off()
+  return(0)
+}
+  
 ########### Start Running Functions ############################
 ################################################################

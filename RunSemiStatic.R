@@ -15,10 +15,10 @@ source("SemiStatic.R")
 d=0.2
 sigma2 = 0.5
 a.vec = plot_gamma_weights(sigma2, d, 
-                           fig.file = paste0("kappa_H_", as.character(d), "_sigma2_", as.character(sigma2), ".jpg"))
+                           fig.file = paste0("figs/kappa_H_", as.character(d), "_sigma2_", as.character(sigma2), ".jpg"))
 sigma2 = 2
 a.vec = plot_gamma_weights(sigma2, d, 
-                           fig.file = paste0("kappa_H_", as.character(d), "_sigma2_", as.character(sigma2), ".jpg"))
+                           fig.file = paste0("figs/kappa_H_", as.character(d), "_sigma2_", as.character(sigma2), ".jpg"))
 ################################################################
 
 
@@ -66,6 +66,25 @@ fig  # need to save manually
 
 ################################################################
 ################################################################
+
+# Revision figures here: 
+# Figure 3: 
+h.vec=c(0.01, 0.05, 0.1, 0.2, 0.5)
+sigma2.vec = c(0.2, 0.5, 0.9, 1.1, 2, 5)
+
+for(sigma2 in sigma2.vec)
+{
+  aa = plot_kappa_limit_weights(sigma2, (h.vec), 
+                             fig.file = paste0("figs/kappa_vs_H_limit_sigma2_", as.character(sigma2), ".jpg"))
+  kk = plot_kappa_limit_weights(sigma2, (h.vec), 
+                                fig.file = paste0("figs/kappa_vs_H_limit_sigma2_", as.character(sigma2), "_no_diff.jpg"), FALSE)
+}
+
+plot_kappa0_limit(sigma2.vec, fig.file = paste0("figs/kappa0_vs_H_limit.jpg"))
+plot_kappa0_limit(sigma2.vec, fig.file = paste0("figs/kappa0_vs_H_limit.jpg"), log.flag = TRUE)
+plot_kappa0_limit(sigma2.vec, fig.file = paste0("figs/alphaH_vs_H_limit.jpg"), plot.alphaH = TRUE)
+
+
 ################################################################
 
 ### Old/unused figures below
