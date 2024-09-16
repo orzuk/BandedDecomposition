@@ -69,13 +69,13 @@ const_plus_I_to_Q_recursive <- function(a, n, D)
 
 # Solve Qudaratic equation to get the value a 
 # Input: 
-# sigma2 - investor's variance
+# sigma2 - market's variance
 # n - number of steps
 # D - delay 
 # Output: 
 # a - constant such that the matrix I_n + a 1^n satisfies ... 
 # (return both roots, take first)
-# Remark: We always assume that the market variance sigma2-hat = 1, this is w.l.o.g. (here and in other functions)
+# Remark: We always assume that the investor's variance sigma = 1, this is w.l.o.g. (here and in other functions)
 sigma2_to_a <- function(sigma2, n, D)
 {
   if(n < 0) # limit n-> infinity 
@@ -102,7 +102,7 @@ sigma2_to_a_limit <- function(sigma2, d, prop.flag = TRUE)
   
 sigma2_to_alpha_limit <- function(sigma2, d)
 {
-  return ( (1 - 2 / (d*sigma2 + sqrt(4*(1-d)*sigma2+d**2 * sigma2**2))) / d )
+  return ( (1 - 2 / (d/sigma2 + sqrt(4*(1-d)/sigma2+d**2 / sigma2**2))) / d )
 }
   
 
@@ -426,7 +426,7 @@ plot_kappa_limit_weights <- function(sigma2, h.vec, fig.file = c(), subtract.kap
     {
 #      y.lim <- range(b.limit$kappa)*1.1
       plot(t.vec[floor(h.vec[i]*res) : (res-1) ], b.limit$kappa[floor(h.vec[i]*res) : (res-1) ], lwd=4, col=col.vec[i], 
-           type="l",  ylim = y.lim, xlim = c(0,1), lty=1,  main = TeX(paste0("$sigma^2=", as.character(sigma2))), 
+           type="l",  ylim = y.lim, xlim = c(0,1), lty=1,  main = TeX(paste0("$\\hat{sigma}^2 / sigma^2=", as.character(sigma2))), 
            xlab="t", ylab=TeX(kappa.str), cex=3, cex.axis=3, cex.lab=3, cex.main=3) # ,  no title 
     } else
     {
@@ -449,9 +449,9 @@ plot_kappa_limit_weights <- function(sigma2, h.vec, fig.file = c(), subtract.kap
                       rep(", alpha H=", length(h.vec)),  as.character(round(alpha.h.vec, 2)), rep("$", length(h.vec)))
   add.legend = 1
   if(add.legend)
-    legend(0.1, (y.lim[1]+y.lim[2])/2, TeX(legend.vec),
+    legend(0.6, (y.lim[1]+y.lim[2])/2, TeX(legend.vec),
            col=col.vec[1:length(h.vec)],  lty=rep(1, length(h.vec)), lwd=rep(3, length(h.vec)),
-           cex=3, box.lwd = 0, box.col = "white", bg = "white")
+           cex=2.5, box.lwd = 0, box.col = "white", bg = "white")
   
   grid(col = "darkgray", lwd=1.5)
   if(!is_empty(fig.file))
@@ -462,6 +462,7 @@ plot_kappa_limit_weights <- function(sigma2, h.vec, fig.file = c(), subtract.kap
 }
 
 
+# Plot the value of kappa0 = alpha / (1-alpha*H) as a function of H for different sigma2 values 
 plot_kappa0_limit <- function(sigma2.vec, fig.file = c(), log.flag = FALSE, plot.alphaH = FALSE)
 {
   col.vec = get_color_vec(num.c=length(sigma2.vec))
@@ -500,8 +501,12 @@ plot_kappa0_limit <- function(sigma2.vec, fig.file = c(), log.flag = FALSE, plot
     kappa.str = "$alpha H$"
     x.lim = c(0, 1)
   } else
-    x.lim = c(0, 0.1)
+     x.lim = c(0, 0.1)
+  if(log.flag)
+    x.lim = c(0, 1)
   
+  
+    
   y.lim <- range(kappa0)*1.1
   
   for(i in 1:length(sigma2.vec))
@@ -520,11 +525,11 @@ plot_kappa0_limit <- function(sigma2.vec, fig.file = c(), log.flag = FALSE, plot
   {
     legend.loc = c(0.05, y.lim[1] + (y.lim[2]-y.lim[1])*0.4)
     for(i in 1:length(sigma2.vec))
-      abline(a = 1-1/sqrt(sigma2.vec[i]), b = 0,  col=col.vec[i], lty=2, lwd=2)
+      abline(a = 1-sqrt(sigma2.vec[i]), b = 0,  col=col.vec[i], lty=2, lwd=2)
   } else  
     legend.loc = c(0.72*x.lim[2], y.lim[1] + (y.lim[2]-y.lim[1])*1.04)
   
-  legend.vec = paste0(rep("$sigma^2=", length(sigma2.vec)), as.character(sigma2.vec), rep("$", length(sigma2.vec)) )
+  legend.vec = paste0(rep("$\\hat{sigma}^2 / sigma^2=", length(sigma2.vec)), as.character(sigma2.vec), rep("$", length(sigma2.vec)) )
   legend(legend.loc[1], legend.loc[2], TeX(legend.vec),
          col=col.vec[1:length(sigma2.vec)],  lty=rep(1, length(sigma2.vec)), lwd=rep(3, length(sigma2.vec)),
          cex=2.5, box.lwd = 0, box.col = "white", bg = "white")
