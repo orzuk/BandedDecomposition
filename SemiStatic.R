@@ -399,7 +399,7 @@ plot_kappa_limit_weights <- function(sigma2, h.vec, fig.file = c(), subtract.kap
       kappa0 <- alpha / (1-alpha*h.vec[i])
       b.limit$kappa <- b.limit$kappa + kappa0
     }
-    new.y.lim <- range(b.limit$kappa)*1.1
+    new.y.lim <- range(b.limit$kappa)*1.05
     if(i == 1)
     {
       y.lim = new.y.lim
@@ -426,7 +426,7 @@ plot_kappa_limit_weights <- function(sigma2, h.vec, fig.file = c(), subtract.kap
     {
 #      y.lim <- range(b.limit$kappa)*1.1
       plot(t.vec[floor(h.vec[i]*res) : (res-1) ], b.limit$kappa[floor(h.vec[i]*res) : (res-1) ], lwd=4, col=col.vec[i], 
-           type="l",  ylim = y.lim, xlim = c(0,1), lty=1,  main = TeX(paste0("$\\hat{sigma}^2 / sigma^2=", as.character(sigma2))), 
+           type="l",  ylim = y.lim, xlim = c(0,1), lty=1,  main = TeX(paste0("$\\hat{varsigma}^2 / varsigma^2=", as.character(sigma2))), 
            xlab="t", ylab=TeX(kappa.str), cex=3, cex.axis=3, cex.lab=3, cex.main=3) # ,  no title 
     } else
     {
@@ -445,11 +445,16 @@ plot_kappa_limit_weights <- function(sigma2, h.vec, fig.file = c(), subtract.kap
     lines(t.vec[1: floor(h.vec[i]*res-1) ], b.limit$kappa[1: floor(h.vec[i]*res-1) ], lwd=4, col=col.vec[i])
   }
     
-  legend.vec = paste0(rep("$H=", length(h.vec)), as.character(round(h.vec, 2)), 
-                      rep(", alpha H=", length(h.vec)),  as.character(round(alpha.h.vec, 2)), rep("$", length(h.vec)))
+  legend.vec = paste0(rep("$H=", length(h.vec)), as.character(round(h.vec, 2))) # , 
+#                      rep(", alpha H=", length(h.vec)),  as.character(round(alpha.h.vec, 2)), rep("$", length(h.vec)))
+  if(subtract.kapp0 == FALSE)
+    y.leg = y.lim[1]+(y.lim[2]-y.lim[1])*0.35
+  else 
+    y.leg = (y.lim[2]+y.lim[1])*0.5
+  
   add.legend = 1
   if(add.legend)
-    legend(0.6, (y.lim[1]+y.lim[2])/2, TeX(legend.vec),
+    legend(0.8, y.leg, TeX(legend.vec),
            col=col.vec[1:length(h.vec)],  lty=rep(1, length(h.vec)), lwd=rep(3, length(h.vec)),
            cex=2.5, box.lwd = 0, box.col = "white", bg = "white")
   
@@ -508,7 +513,9 @@ plot_kappa0_limit <- function(sigma2.vec, fig.file = c(), log.flag = FALSE, plot
   
     
   y.lim <- range(kappa0)*1.1
-  
+  y.lim[1] = max(y.lim[1], -100)
+  y.lim[2] = min(y.lim[2], 100)
+    
   for(i in 1:length(sigma2.vec))
   {
     if(i == 1)
@@ -529,7 +536,7 @@ plot_kappa0_limit <- function(sigma2.vec, fig.file = c(), log.flag = FALSE, plot
   } else  
     legend.loc = c(0.72*x.lim[2], y.lim[1] + (y.lim[2]-y.lim[1])*1.04)
   
-  legend.vec = paste0(rep("$\\hat{sigma}^2 / sigma^2=", length(sigma2.vec)), as.character(sigma2.vec), rep("$", length(sigma2.vec)) )
+  legend.vec = paste0(rep("$\\hat{varsigma}^2 / varsigma^2=", length(sigma2.vec)), as.character(sigma2.vec), rep("$", length(sigma2.vec)) )
   legend(legend.loc[1], legend.loc[2], TeX(legend.vec),
          col=col.vec[1:length(sigma2.vec)],  lty=rep(1, length(sigma2.vec)), lwd=rep(3, length(sigma2.vec)),
          cex=2.5, box.lwd = 0, box.col = "white", bg = "white")

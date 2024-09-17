@@ -70,7 +70,7 @@ fig  # need to save manually
 # Revision figures here: 
 # Figure 3: 
 h.vec=c(0.01, 0.05, 0.1, 0.2, 0.5)
-sigma2.vec = c(0.2, 0.5, 0.9, 1.1, 2, 5)
+sigma2.vec = c(0.2, 0.25, 0.5, 0.9, 1.1, 2, 4, 5)
 
 for(sigma2 in sigma2.vec)
 {
@@ -80,6 +80,7 @@ for(sigma2 in sigma2.vec)
                                 fig.file = paste0("figs/kappa_vs_H_limit_sigma2_", as.character(sigma2), "_no_diff.jpg"), FALSE)
 }
 
+sigma2.vec = c(0.2, 0.5, 0.9, 1.1, 2, 5)
 plot_kappa0_limit(sigma2.vec, fig.file = paste0("figs/kappa0_vs_H_limit.jpg"))
 plot_kappa0_limit(sigma2.vec, fig.file = paste0("figs/kappa0_vs_H_limit.jpg"), log.flag = TRUE)
 plot_kappa0_limit(sigma2.vec, fig.file = paste0("figs/alphaH_vs_H_limit.jpg"), plot.alphaH = TRUE)
