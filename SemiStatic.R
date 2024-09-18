@@ -320,7 +320,7 @@ plot_gamma_weights <- function(sigma2, d, n.vec = c(10, 100, 1000), fig.file = c
   y.lim <- range(b.limit$kappa)*1.1
   plot(t.vec[1: floor(d*res-1) ], b.limit$kappa[1: floor(d*res-1) ], 
        type="l", lwd=4, col="black", ylim = y.lim, xlim = c(0,1), lty=1,  
-       xlab="t", ylab=TeX("$kappa_t - \\frac{alpha}{1-alpha H}$"), cex=3, cex.axis=3, cex.lab=3, cex.main=3) # ,  no title 
+       xlab="t", ylab=TeX("$kappa_t - kappa_0$"), cex=3, cex.axis=3, cex.lab=3, cex.main=3) # ,  no title  #  \\frac{alpha}{1-alpha H}
 #       main=TeX(paste0("Investment weights vs. time for $sigma^2=", as.character(sigma2), " ; d=", as.character(d), "$")))
   
   
@@ -387,7 +387,7 @@ plot_kappa_limit_weights <- function(sigma2, h.vec, fig.file = c(), subtract.kap
   res = 10000
   t.vec <- (1:(res-1))/res
   
-  kappa.str = "$kappa_t - \\frac{alpha}{1-alpha H}$"
+  kappa.str = "$kappa_t - kappa_0$" # \\frac{alpha}{1-alpha H}$"
 
   for(i in 1:length(h.vec))
   {
@@ -432,6 +432,10 @@ plot_kappa_limit_weights <- function(sigma2, h.vec, fig.file = c(), subtract.kap
     {
       lines(t.vec[floor(h.vec[i]*res) : (res-1) ], b.limit$kappa[floor(h.vec[i]*res) : (res-1) ], lwd=4, col=col.vec[i])
     }  
+    
+    # Show points for first interval 
+    points(t.vec[floor(h.vec[i]*res-1)], b.limit$kappa[floor(h.vec[i]*res-1)], pch=1, col=col.vec[i], cex=3, lwd=2.5)
+    points(t.vec[floor(h.vec[i]*res)], b.limit$kappa[floor(h.vec[i]*res)], pch=19, col=col.vec[i], cex=3)
   }
   for(i in rev(1:length(h.vec)))
   {
@@ -454,7 +458,7 @@ plot_kappa_limit_weights <- function(sigma2, h.vec, fig.file = c(), subtract.kap
   
   add.legend = 1
   if(add.legend)
-    legend(0.8, y.leg, TeX(legend.vec),
+    legend(0.7, y.leg, TeX(legend.vec),
            col=col.vec[1:length(h.vec)],  lty=rep(1, length(h.vec)), lwd=rep(3, length(h.vec)),
            cex=2.5, box.lwd = 0, box.col = "white", bg = "white")
   
