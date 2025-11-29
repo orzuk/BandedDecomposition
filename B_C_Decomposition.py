@@ -178,6 +178,41 @@ def constrained_decomposition(A, allow_indefinite_B=False,
 
 
 
+import numpy as np
+
+def spd_hilbert(n):
+    """Hilbert matrix, dense SPD."""
+    i = np.arange(1, n+1)
+    j = np.arange(1, n+1)
+    return 1.0 / (i[:, None] + j[None, :] - 1)
+
+
+def spd_ar1(n, rho=0.8):
+    """AR(1)-type Toeplitz covariance matrix."""
+    i = np.arange(n)
+    j = np.arange(n)
+    return rho ** np.abs(i[:, None] - j[None, :])
+
+
+def spd_brownian(n):
+    """Brownian-motion covariance matrix: K_ij = min(i,j)."""
+    i = np.arange(1, n+1)
+    j = np.arange(1, n+1)
+    return np.minimum(i[:, None], j[None, :]).astype(float)
+
+
+def spd_gaussian_kernel(n, gamma=0.1):
+    """Gaussian kernel matrix: e^{-gamma (i-j)^2}."""
+    i = np.arange(n)
+    j = np.arange(n)
+    return np.exp(-gamma * (i[:, None] - j[None, :])**2)
+
+
+# -------- example usage --------
+
+
+
+
 if __name__ == "__main__":
     np.set_printoptions(precision=3, suppress=True)
     random_A = False # True # False
@@ -185,17 +220,22 @@ if __name__ == "__main__":
 
     # Construct a random SPD matrix A
     if random_A:
-        n = 14
+        n = 20
         M = np.random.randn(n, n)
         A = M @ M.T + n * np.eye(n)  # ensures SPD
     else:
-        n = 7
+        n = 5
         A = np.array([
             [6, 2, 1],
             [2, 5, 2],
             [1, 2, 4]
         ], dtype=float)
-        A = np.eye(n)
+        # Differnent options for A:
+       # A = np.eye(n)
+       # A = spd_hilbert(n)
+       # A = spd_ar1(n)
+        A = spd_brownian(n)
+       # A = spd_gaussian_kernel(n)
 
     print("A =")
     print(A)
