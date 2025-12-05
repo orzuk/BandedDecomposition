@@ -1,7 +1,8 @@
 import numpy as np
 import matplotlib.pyplot as plt
-import time
 
+import time
+import math
 
 def plot_decomposition_heatmaps(A, B, C, filename=None):
     """
@@ -11,36 +12,65 @@ def plot_decomposition_heatmaps(A, B, C, filename=None):
         bottom-left:  B
         bottom-right: B^{-1}
 
-    The figure title contains the Frobenius norm error between A and B^{-1}+C.
-    If filename is given, the figure is saved as a PNG.
+    Title includes:
+        - Reconstruction error
+        - Sum of (Bkk - Bk,k+1)
+        - Max |Bkk - Bk,k+1|
+        - Phi = -log det(A - C)
+
+    Everything printed with 3 significant digits.
     """
+
+
     A = np.asarray(A, dtype=float)
     B = np.asarray(B, dtype=float)
     C = np.asarray(C, dtype=float)
 
+    # Compute inverse and reconstruction error
     Binv = np.linalg.inv(B)
     A_reconstructed = Binv + C
     err = np.linalg.norm(A - A_reconstructed, ord="fro")
 
-    fig, axes = plt.subplots(2, 2, figsize=(8, 6))
+    # Compute gradient diagnostic g_k = Bkk - Bk,k+1
+    n = B.shape[0]
+    g = np.array([B[k, k] - B[k, k+1] for k in range(n - 1)])
+    sum_g = np.sum(g)
+    max_g = np.max(np.abs(g))
 
+    # Compute phi = -log det(A - C)
+    M = A - C
+    try:
+        L = np.linalg.cholesky(M)
+        logdet = 2 * np.sum(np.log(np.diag(L)))
+        phi = -logdet
+    except np.linalg.LinAlgError:
+        phi = np.nan  # If not SPD, logdet undefined
+
+    # --- Plotting ---
+    fig, axes = plt.subplots(2, 2, figsize=(8, 6))
     matrices = [[A, C],
                 [B, Binv]]
     titles = [["A", "C"],
-              ["B", "B$^{-1}$"]]
+              ["B", r"$B^{-1}$"]]
 
     for r in range(2):
         for c in range(2):
             ax = axes[r, c]
             im = ax.imshow(matrices[r][c], aspect="equal")
             ax.set_title(titles[r][c])
-            # individual colorbar for each subplot
             fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 
-    fig.suptitle(rf"Decomposition heatmaps, "
-                 rf"$\|A - (B^{{-1}} + C)\|_F = {err:.3g}$")
+    # --- Title: small font and multiple diagnostics ---
+    fig.suptitle(
+        rf"Decomposition heatmaps"
+        rf"\n$\|A-(B^{{-1}}+C)\|_F = {err:.3g}$"
+        rf",  $\sum g_k = {sum_g:.3g}$"
+        rf",  $\max |g_k| = {max_g:.3g}$"
+        rf",  $\phi = {phi:.3g}$",
+        fontsize=9
+    )
 
-    plt.tight_layout(rect=[0, 0, 1, 0.93])
+    plt.tight_layout(rect=[0, 0, 1, 0.90])
 
     if filename is not None:
         fig.savefig(filename, dpi=150, bbox_inches="tight")
@@ -318,6 +348,8 @@ def constrained_decomposition(
                     f"Converged: max|Bkk-Bk,k+1|={max_r:.3e} < tol={tol}"
                 )
             break
+        else:
+            print("max_r:", max_r, " tol:", tol)
 
         # Occasionally report change over a window
         if verbose and it > 0 and (it % 50 == 0):
@@ -443,12 +475,15 @@ def spd_gaussian_kernel(n, gamma=0.1):
     return np.exp(-gamma * (i[:, None] - j[None, :])**2)
 
 
-def spd_fractional_BM(n, H=0.5, T=1.0):
+def spd_fractional_BM(n, H=0.5, T=1.0, diff_flag=False):
     """
     Fractional Brownian motion covariance matrix on an equispaced grid.
 
     A[i,j] = 0.5 * (T/n)^(2H) * ( i^(2H) + j^(2H) - |i-j|^(2H) )
     with i,j = 1,...,n (1-based indices in the formula).
+
+    For diff:
+    A[i,j] = 0.5 * (T/n)^(2H) * ( (i-j-1)^(2H) + (i-j+1)^(2H) - 2*|i-j|^(2H) )
 
     Parameters
     ----------
@@ -458,6 +493,7 @@ def spd_fractional_BM(n, H=0.5, T=1.0):
         Hurst parameter in (0,1).
     T : float, default 1.0
         Final time horizon.
+    diff_flag: Show covariance of differences
     """
     i = np.arange(1, n + 1, dtype=float)
     j = np.arange(1, n + 1, dtype=float)
@@ -465,9 +501,82 @@ def spd_fractional_BM(n, H=0.5, T=1.0):
     J = j[None, :]
 
     factor = 0.5 * (T / n) ** (2.0 * H)
-    A = factor * (I ** (2.0 * H) + J ** (2.0 * H) - np.abs(I - J) ** (2.0 * H))
+
+    if not diff_flag:
+        A = factor * (I ** (2.0 * H) + J ** (2.0 * H) - np.abs(I - J) ** (2.0 * H))
+    else:
+        A = factor * (np.abs(I - J - 1) ** (2.0 * H) + np.abs(I - J + 1) ** (2.0 * H) - 2.0 * np.abs(I - J) ** (2.0 * H))
     return A
 
+
+def spd_inverse(A):
+    # Symmetrize
+    A = 0.5 * (A + A.T)
+    L = np.linalg.cholesky(A)        # A = L L^T
+    n = A.shape[0]
+    I = np.eye(n)
+    # Solve A X = I → L L^T X = I
+    Y = np.linalg.solve(L, I)
+    A_inv = np.linalg.solve(L.T, Y)
+    # Re-symmetrize to kill numerical asymmetry
+    A_inv = 0.5 * (A_inv + A_inv.T)
+    return A_inv
+
+
+# Computing value
+# Markovian strategy:
+def invest_value_markovian(B, C, log_flag = True):
+
+    (signB, logabsdetB) = np.linalg.slogdet(B)
+    (signC, logabsdetC) = np.linalg.slogdet(C)
+
+    if log_flag:
+        return (0.5*(logabsdetC-logabsdetB))
+    else:
+        return -math.exp(0.5*(logabsdetC-logabsdetB))
+
+# General strategy:
+def invest_value_general(A, log_flag = True):
+    A_inv = spd_inverse(A)
+    logabsdetC = -np.sum(np.log(np.diag(A_inv)))
+
+    (signA, logabsdetA) = np.linalg.slogdet(A)
+
+    if log_flag:
+        return (0.5*(logabsdetA-logabsdetC))
+    else:
+        return -math.exp(0.5*(logabsdetA-logabsdetC))
+
+
+
+def compute_value_vs_H(H_vec, n=100):
+    n_H = len(H_vec)
+    val_vec_markovian = np.zeros(n_H)
+    val_vec_general = np.zeros(n_H)
+    for i in range(n_H):
+        # Build matrix
+        A = spd_fractional_BM(n, H=H_vec[i], T=1.0)
+        A_inv = spd_inverse(A)
+        print("Is A pos.def? ", is_spd(A))
+        print("Is A_inv pos.def? ", is_spd(A_inv))
+
+        B_newt, C_newt, x_newt = constrained_decomposition(
+            A_inv,
+            allow_indefinite_B=False,
+            tol=1e-6,  # lower resolution!
+            max_iter=500,  # Newton should need far fewer iters
+            method="newton",
+            verbose=True)
+
+        val_vec_markovian[i] = invest_value_markovian(B_newt, A)
+        print("Finished MArkovian, no do general: ")
+
+        A_diff = spd_fractional_BM(n, H=H_vec[i], T=1.0, diff_flag = True)
+
+        val_vec_general[i]  = invest_value_general(A_diff)
+        print("Run H=", H_vec[i], " val_general=", val_vec_general[i], " val_markovian=", val_vec_markovian[i])
+
+    return val_vec_markovian, val_vec_general
 
 
 # -------- example usage --------
@@ -485,18 +594,19 @@ if __name__ == "__main__":
         M = np.random.randn(n, n)
         A = M @ M.T + n * np.eye(n)  # ensures SPD
     else:
-        n = 100
-        A = spd_fractional_BM(n, H=0.5, T=1.0)
+        n = 10
+        A = spd_fractional_BM(n, H=0.8, T=1.0)
         # Or any other SPD constructor
 
     print("A =")
     print(A)
+    A_inv = spd_inverse(A)
 
     # ---------- Gradient descent ----------
     print("\n=== Gradient Descent Method ===")
     t0 = time.perf_counter()
     B_gd, C_gd, x_gd = constrained_decomposition(
-        A,
+        A_inv,
         allow_indefinite_B=False,
         tol=1e-8,
         max_iter=500,
@@ -508,10 +618,10 @@ if __name__ == "__main__":
     print(f"Running time (gradient descent): {runtime_gd:.4f} seconds")
 
     A_rec_gd = np.linalg.inv(B_gd) + C_gd
-    err_gd = np.linalg.norm(A - A_rec_gd, ord="fro")
+    err_gd = np.linalg.norm(A_inv - A_rec_gd, ord="fro")
     print("\n[GD] Reconstruction error (Frobenius):", err_gd)
 
-    _, grad_gd, _, _, _ = phi_and_grad_spd(A, x_gd)
+    _, grad_gd, _, _, _ = phi_and_grad_spd(A_inv, x_gd)
     grad_norm_gd = np.linalg.norm(grad_gd)
     r_gd = np.array([B_gd[k, k] - B_gd[k, k + 1] for k in range(A.shape[0] - 1)])
     max_r_gd = np.max(np.abs(r_gd))
@@ -520,14 +630,14 @@ if __name__ == "__main__":
     print("Verification (GD): isposdef(B)=", is_spd(B_gd),
           " ; isposdef(C)=", is_spd(C_gd))
 
-    plot_decomposition_heatmaps(A, B_gd, C_gd,
+    plot_decomposition_heatmaps(A_inv, B_gd, C_gd,
                                 filename="n_" + str(n) + "_decomposition_heatmaps_gd.png")
 
     # ---------- Quasi-Newton (BFGS) ----------
     print("\n=== Quasi-Newton (BFGS) Method ===")
     t0 = time.perf_counter()
     B_qn, C_qn, x_qn = constrained_decomposition(
-        A,
+        A_inv,
         allow_indefinite_B=False,
         tol=1e-8,
         max_iter=1000,
@@ -539,10 +649,10 @@ if __name__ == "__main__":
     print(f"Running time (quasi-Newton): {runtime_qn:.4f} seconds")
 
     A_rec_qn = np.linalg.inv(B_qn) + C_qn
-    err_qn = np.linalg.norm(A - A_rec_qn, ord="fro")
+    err_qn = np.linalg.norm(A_inv - A_rec_qn, ord="fro")
     print("\n[QN] Reconstruction error (Frobenius):", err_qn)
 
-    _, grad_qn, _, _, _ = phi_and_grad_spd(A, x_qn)
+    _, grad_qn, _, _, _ = phi_and_grad_spd(A_inv, x_qn)
     grad_norm_qn = np.linalg.norm(grad_qn)
     r_qn = np.array([B_qn[k, k] - B_qn[k, k + 1] for k in range(A.shape[0] - 1)])
     max_r_qn = np.max(np.abs(r_qn))
@@ -551,16 +661,18 @@ if __name__ == "__main__":
     print("Verification (QN): isposdef(B)=", is_spd(B_qn),
           " ; isposdef(C)=", is_spd(C_qn))
 
-    plot_decomposition_heatmaps(A, B_qn, C_qn,
+    plot_decomposition_heatmaps(A_inv, B_qn, C_qn,
                                 filename="n_" + str(n) + "_decomposition_heatmaps_qn.png")
+
+
 
     # ---------- Newton method ----------
     print("\n=== Newton Method ===")
     t0 = time.perf_counter()
     B_newt, C_newt, x_newt = constrained_decomposition(
-        A,
+        A_inv,
         allow_indefinite_B=False,
-        tol=1e-8,
+        tol=1e-6,  # lower resolution
         max_iter=500,          # Newton should need far fewer iters
         method="newton",
         verbose=True,
@@ -573,7 +685,7 @@ if __name__ == "__main__":
     err_newt = np.linalg.norm(A - A_rec_newt, ord="fro")
     print("\n[Newton] Reconstruction error (Frobenius):", err_newt)
 
-    _, grad_newt, _, _, _ = phi_and_grad_spd(A, x_newt)
+    _, grad_newt, _, _, _ = phi_and_grad_spd(A_inv, x_newt)
     grad_norm_newt = np.linalg.norm(grad_newt)
     r_newt = np.array([B_newt[k, k] - B_newt[k, k + 1] for k in range(A.shape[0] - 1)])
     max_r_newt = np.max(np.abs(r_newt))
@@ -582,8 +694,13 @@ if __name__ == "__main__":
     print("Verification (Newton): isposdef(B)=", is_spd(B_newt),
           " ; isposdef(C)=", is_spd(C_newt))
 
-    plot_decomposition_heatmaps(A, B_newt, C_newt,
+    plot_decomposition_heatmaps(A_inv, B_newt, C_newt,
                                 filename="n_" + str(n) + "_decomposition_heatmaps_newton.png")
+
+    print("A_inv:", A_inv)
+    print("B:", B_newt)
+    print("C:", C_newt)
+
 
     # ---------- Compare all three ----------
     dB_qn_newt = np.linalg.norm(B_qn - B_newt, ord="fro")
@@ -597,4 +714,24 @@ if __name__ == "__main__":
     print(f"||B_qn   - B_newt||_F = {dB_qn_newt:.3e}")
     print(f"||C_qn   - C_newt||_F = {dC_qn_newt:.3e}")
     print(f"||x_qn   - x_newt||   = {dx_qn_newt:.3e}")
+
+
+    # New: compute game value
+    plot_graph = True
+    if plot_graph:
+        n=100  # For value
+        H_res = 0.005
+        H_vec = np.linspace(H_res, 1-H_res, int(1/H_res)-1)
+        val_vec_markovian, val_vec_general, = compute_value_vs_H(H_vec, n)
+
+        # Plotting:
+        plt.plot(H_vec, val_vec_markovian, label="Markovian")  # blue by default
+        plt.plot(H_vec, val_vec_general, color="red", label="General")
+
+        plt.xlabel("H")
+        plt.ylabel("log(Value)")
+
+        plt.legend(loc="best")  # <-- add this
+
+        plt.savefig("value_vs_H_n_" + str(n) + ".png")
 
