@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 import time
 import math
 
-def plot_decomposition_heatmaps(A, B, C, filename=None):
+def plot_decomposition_heatmaps(A, B, C, basis, filename=None, add_title=False):
     """
     Plot 2x2 heatmaps:
         top-left:  A
@@ -21,19 +21,20 @@ def plot_decomposition_heatmaps(A, B, C, filename=None):
     Everything printed with 3 significant digits.
     """
 
-
     A = np.asarray(A, dtype=float)
     B = np.asarray(B, dtype=float)
     C = np.asarray(C, dtype=float)
 
     # Compute inverse and reconstruction error
-    Binv = np.linalg.inv(B)
+    Binv = spd_inverse(B)
     A_reconstructed = Binv + C
     err = np.linalg.norm(A - A_reconstructed, ord="fro")
 
     # Compute gradient diagnostic g_k = Bkk - Bk,k+1
     n = B.shape[0]
-    g = np.array([B[k, k] - B[k, k+1] for k in range(n - 1)])
+
+    g = basis.trace_with(B) #     g = np.array([B[k, k] - B[k, k+1] for k in range(n - 1)])
+
     sum_g = np.sum(g)
     max_g = np.max(np.abs(g))
 
@@ -61,14 +62,15 @@ def plot_decomposition_heatmaps(A, B, C, filename=None):
             fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 
     # --- Title: small font and multiple diagnostics ---
-    fig.suptitle(
-        rf"Decomposition heatmaps"
-        rf"\n$\|A-(B^{{-1}}+C)\|_F = {err:.3g}$"
-        rf",  $\sum g_k = {sum_g:.3g}$"
-        rf",  $\max |g_k| = {max_g:.3g}$"
-        rf",  $\phi = {phi:.3g}$",
-        fontsize=9
-    )
+    if add_title:
+        fig.suptitle(
+            rf"Decomposition heatmaps"
+            rf"\n$\|A-(B^{{-1}}+C)\|_F = {err:.3g}$"
+            rf",  $\sum g_k = {sum_g:.3g}$"
+            rf",  $\max |g_k| = {max_g:.3g}$"
+            rf",  $\phi = {phi:.3g}$",
+            fontsize=9
+        )
 
     plt.tight_layout(rect=[0, 0, 1, 0.90])
 
@@ -78,160 +80,34 @@ def plot_decomposition_heatmaps(A, B, C, filename=None):
 
     return fig, axes
 
-def is_spd(M, tol=1e-12):
-    """Check symmetric positive definite via Cholesky."""
+def is_spd(M, sym_tol=1e-12, jitter=0.0):
+    """
+    Robust SPD check:
+      - symmetrize first (removes tiny asymmetry)
+      - optional diagonal jitter (helps near-boundary SPD)
+      - then Cholesky
+    """
     M = np.asarray(M, dtype=float)
-    if not np.allclose(M, M.T, atol=tol):
-        return False
+    M = 0.5 * (M + M.T)
+
+    # Optional: if you still want a symmetry diagnostic, do it after symmetrizing
+    # but don't use it as a hard failure condition.
+    if sym_tol is not None:
+        # relative-ish symmetry check
+        if np.linalg.norm(M - M.T, ord="fro") > sym_tol * np.linalg.norm(M, ord="fro"):
+            return False  # this is now basically never triggered after sym()
+
+    n = M.shape[0]
+    if jitter == "auto":
+        jitter = 1e-12 * (np.trace(M) / n)  # scale-aware tiny diagonal bump
+
     try:
-        np.linalg.cholesky(M)
+        np.linalg.cholesky(M + (jitter * np.eye(n) if jitter else 0.0))
         return True
     except np.linalg.LinAlgError:
         return False
 
 
-
-def build_C_from_x(x):
-    """
-    Given x in R^{n-1}, build the tridiagonal C(x) satisfying:
-      C_{kk} = x_k
-      C_{k,k+1} = C_{k+1,k} = -x_k / 2
-      C_{nn} = 0
-    Here indices are 0-based in Python.
-    """
-    x = np.asarray(x, dtype=float)
-    n_minus_1 = x.shape[0]
-    n = n_minus_1 + 1
-    C = np.zeros((n, n), dtype=float)
-
-    for k in range(n_minus_1):
-        C[k, k] = x[k]
-        C[k, k + 1] = -0.5 * x[k]
-        C[k + 1, k] = -0.5 * x[k]
-    # C[n-1, n-1] already 0
-    return C
-
-
-def phi_and_grad_spd(A, x):
-    """
-    Phi(x) = -log det(A - C(x))  with A - C(x) required SPD.
-    Returns: phi, grad (length n-1), B, C, M
-    """
-    C = build_C_from_x(x)
-    M = A - C
-
-    # Cholesky for SPD + logdet
-    L = np.linalg.cholesky(M)
-    logdet = 2.0 * np.sum(np.log(np.diag(L)))
-    phi = -logdet
-
-    # B = M^{-1}
-    # cheaper than np.linalg.inv(M) for repeated solves: but here we just do inv
-    B = spd_inverse(M)
-
-    n = A.shape[0]
-    grad = np.empty(n - 1, dtype=float)
-    for k in range(n - 1):
-        grad[k] = B[k, k] - B[k, k + 1]
-
-    return phi, grad, B, C, M
-
-
-def phi_and_grad_general(A, x):
-    """
-    Phi(x) = -log |det(A - C(x))|, allowing A - C(x) to be indefinite
-    as long as it is invertible.
-    Returns: phi, grad (length n-1), B, C, M
-    """
-    C = build_C_from_x(x)
-    M = A - C
-
-    # det and log |det|
-    sign, logabsdet = np.linalg.slogdet(M)
-    if sign == 0:
-        raise np.linalg.LinAlgError("A - C(x) is singular.")
-    phi = -logabsdet  # use -log |det|
-
-    B = spd_inverse(M)
-
-    n = A.shape[0]
-    grad = np.empty(n - 1, dtype=float)
-    for k in range(n - 1):
-        grad[k] = B[k, k] - B[k, k + 1]
-
-    return phi, grad, B, C, M
-
-
-
-def hessian_phi_spd_from_B(B):
-    """
-    Structured Hessian of Phi(x) = -log det(A - C(x)) in the SPD case,
-    using only entries of B = (A - C(x))^{-1}.
-
-    H_{kl} = Tr(B D^{(l)} B D^{(k)}),
-    where D^{(k)} has support on indices {k,k+1}.
-
-    Input
-    -----
-    B : (n,n) ndarray, symmetric positive definite
-
-    Returns
-    -------
-    H : (n-1,n-1) ndarray
-        Hessian in x-coordinates.
-    """
-    B = np.asarray(B, dtype=float)
-    n = B.shape[0]
-    m = n - 1
-    H = np.zeros((m, m), dtype=float)
-
-    # Diagonal blocks
-    for k in range(m):
-        Bkk = B[k, k]
-        Bk_k1 = B[k, k + 1]
-        Bk1_k1 = B[k + 1, k + 1]
-        H[k, k] = (
-            Bkk**2
-            - 2.0 * Bkk * Bk_k1
-            + 0.5 * Bkk * Bk1_k1
-            + 0.5 * Bk_k1**2
-        )
-
-    # Off-diagonal blocks
-    for k in range(m):
-        # Neighbor l = k+1 (only if k+2 exists)
-        l = k + 1
-        if l < m and (k + 2) < n:
-            Bk_k1 = B[k, k + 1]
-            Bk_k2 = B[k, k + 2]
-            Bk1_k1 = B[k + 1, k + 1]
-            Bk1_k2 = B[k + 1, k + 2]
-            val = (
-                Bk_k1**2
-                - Bk_k1 * Bk_k2
-                - Bk_k1 * Bk1_k1
-                + 0.5 * Bk_k1 * Bk1_k2
-                + 0.5 * Bk_k2 * Bk1_k1
-            )
-            H[k, l] = H[l, k] = val
-
-        # Non-neighbor l >= k+2
-        for l in range(k + 2, m):
-            # Here l+1 <= n-1 automatically
-            Bk_l = B[k, l]
-            Bk_l1 = B[k, l + 1]
-            Bk1_l = B[k + 1, l]
-            Bk1_l1 = B[k + 1, l + 1]
-            val = (
-                Bk_l**2
-                - Bk_l * Bk_l1
-                - Bk_l * Bk1_l
-                + 0.5 * Bk_l * Bk1_l1
-                + 0.5 * Bk_l1 * Bk1_l
-            )
-            H[k, l] = H[l, k] = val
-
-    return H
 
 
 ######################################################
@@ -270,8 +146,7 @@ def spd_toeplitz_ar1(n: int, rho: float = 0.8, sigma2: float = 1.0) -> np.ndarra
     # Toeplitz via |i-j|
     A = sigma2 * (rho ** np.abs(idx[:, None] - idx[None, :]))
     # Symmetry is exact, but keep it clean numerically:
-    A = 0.5 * (A + A.T)
-    return A
+    return  0.5 * (A + A.T)  # A
 
 def spd_brownian(n):
     """Brownian-motion covariance matrix: K_ij = min(i,j)."""

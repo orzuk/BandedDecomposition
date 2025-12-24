@@ -1,6 +1,7 @@
 from constrained_decomposition_utils import *
 from constrained_decomposition_general import constrained_decomposition, TridiagC_Basis
 import matplotlib.pyplot as plt
+from pathlib import Path
 
 
 # Computing value
@@ -61,8 +62,8 @@ def compute_value_vs_H(H_vec, n=100):
 
 if __name__ == "__main__":
     # --- Experiment settings ---
-    n = 100
-    H_vec = np.linspace(0.1, 0.9, 17)   # change resolution as you like
+    n = 500
+    H_vec = np.linspace(0.005, 0.995, 199)   # change resolution as you like
 
     # --- Run ---
     val_markov, val_general = compute_value_vs_H(H_vec, n=n)
@@ -77,7 +78,37 @@ if __name__ == "__main__":
     plt.legend()
     plt.tight_layout()
 
-    out_png = f"value_vs_H_n_{n}.png"
+    # --- Save in figs/ next to this script (robust to PyCharm working dir) ---
+    here = Path(__file__).resolve().parent
+    fig_dir = here / "figs" / "new"
+    fig_dir.mkdir(exist_ok=True)
+
+    out_png = fig_dir / f"value_vs_H_n_{n}.png"
     plt.savefig(out_png, dpi=150)
-    plt.show()
-    print("Saved:", out_png)
+    print("Saved value figure to:", out_png)
+
+
+    # ---- Save decomposition heatmaps for a chosen H ----
+    H0 = 0.7  # pick one (or loop over a few)
+    A = spd_fractional_BM(n, H=H0, T=1.0, diff_flag=True)
+    A_inv = spd_inverse(A)
+
+    basis = TridiagC_Basis(n)
+    B0, C0, x0 = constrained_decomposition(
+        A=A_inv,
+        basis=basis,
+        method="newton",
+        tol=1e-6,
+        max_iter=500,
+        verbose=False
+    )
+
+    out_heat = fig_dir / f"heatmap_decomposition_H_{H0:.2f}_n_{n}.png"
+    plot_decomposition_heatmaps(
+        A=A_inv,
+        B=B0,
+        C=C0,
+        basis=basis,
+        filename=out_heat, #       title=f"Decomposition heatmap (H={H0:.2f}, n={n})"
+    )
+    print("Saved heatmap to:", out_heat)

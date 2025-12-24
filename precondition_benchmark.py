@@ -46,10 +46,6 @@ def sym(A: np.ndarray) -> np.ndarray:
     return 0.5 * (A + A.T)
 
 
-def is_spd(A: np.ndarray, tol: float = 1e-12) -> bool:
-    return bc.is_spd(A, tol=tol)
-
-
 def chol_factor(A: np.ndarray) -> np.ndarray:
     """Return lower-triangular Cholesky factor L s.t. A = L L^T."""
     return np.linalg.cholesky(A)
@@ -110,7 +106,7 @@ def spd_generate(n: int, matrix_type: str, **params: Any) -> np.ndarray:
       - "fractional_bm" / "fbm": uses bc.spd_fractional_BM(n, H=..., T=...)
       - "hilbert": uses bc.spd_hilbert(n)
       - "ar1": uses bc.spd_ar1(n, rho=...)
-      - "toeplitz_exp": uses bc.spd_toeplitz_exp(n, rho=...) if available
+      - "toeplitz_exp": uses bc.spd_toeplitz_ar1(n, rho=...) if available
       - "random_spd": uses bc.random_spd(n, cond=...) if available, else fallback
       - "wishart": uses bc.spd_wishart(n, df=..., seed=...) if available, else fallback
 
@@ -140,15 +136,15 @@ def spd_generate(n: int, matrix_type: str, **params: Any) -> np.ndarray:
         return sym(bc.spd_ar1(n, rho=rho))
 
     # Exponential Toeplitz (if you have it)
-    if t in {"toeplitz_exp", "toeplitz", "exp_toeplitz"}:
-        if hasattr(bc, "spd_toeplitz_exp"):
+    if t in {"toeplitz_exp", "toeplitz", "exp_toeplitz", "toeplitz_ar1"}:
+        if hasattr(bc, "spd_toeplitz_ar1"):
             rho = float(params.get("rho", 0.9))
-            return sym(bc.spd_toeplitz_exp(n, rho=rho))
+            return sym(bc.spd_toeplitz_ar1(n, rho=rho))
         elif hasattr(bc, "spd_toeplitz"):
             rho = float(params.get("rho", 0.9))
             return sym(bc.spd_toeplitz(n, rho=rho))
         else:
-            raise ValueError("Neither bc.spd_toeplitz_exp nor bc.spd_toeplitz found.")
+            raise ValueError("Neither bc.spd_toeplitz_ar1 nor bc.spd_toeplitz found.")
 
     # Random SPD (if provided)
     if t in {"random_spd", "random"}:
@@ -236,11 +232,11 @@ def build_standard_preconditioner(A: np.ndarray, structural_class: str, *,
     else:
         raise ValueError(f"Unknown structural_class='{structural_class}'.")
 
-    if not is_spd(P):
+    if not bc.is_spd(P):
         t = jitter
         for _ in range(14):
             P_try = P + t * np.eye(n)
-            if is_spd(P_try):
+            if bc.is_spd(P_try):
                 P = P_try
                 break
             t *= 10.0
@@ -276,7 +272,13 @@ def build_my_preconditioner(A: np.ndarray, my_class: str, *,
             Returns P = B^{-1}.
     """
     A = sym(np.asarray(A, dtype=float))
-    if not is_spd(A):
+
+    eps = 1e-12 * np.trace(A) / A.shape[0]
+    try:
+        np.linalg.cholesky(A + eps * np.eye(A.shape[0]))
+    except np.linalg.LinAlgError:
+        raise ValueError("A must be SPD.")
+    if not bc.is_spd(A):
         raise ValueError("A must be SPD for 'my' preconditioner.")
 
     sc = my_class.lower()
@@ -297,7 +299,7 @@ def build_my_preconditioner(A: np.ndarray, my_class: str, *,
     r = np.array([B[k, k] - B[k, k + 1] for k in range(n - 1)]) if n > 1 else np.array([0.0])
     max_r = float(np.max(np.abs(r)))
 
-    if not is_spd(P):
+    if not bc.is_spd(P):
         P += 1e-12 * np.eye(P.shape[0])
 
     return MyPreconditionerResult(
@@ -418,7 +420,8 @@ def benchmark_preconditioners(A: np.ndarray,
                               rhs_seed: int = 0,
                               decomp_tol: float = 1e-8,
                               decomp_max_iter: int = 500,
-                              decomp_method: str = "newton") -> Tuple[BenchmarkReport, Dict[str, Any]]:
+                              decomp_method: str = "newton",
+                              compute_conds: bool = True,) -> Tuple[BenchmarkReport, Dict[str, Any]]:
     """
     Compare:
       - Standard preconditioner in 'standard_class'
@@ -433,8 +436,8 @@ def benchmark_preconditioners(A: np.ndarray,
     """
     A = sym(np.asarray(A, dtype=float))
     n = A.shape[0]
-    if not is_spd(A):
-        raise ValueError("A must be SPD.")
+    if not bc.is_spd(A, jitter="auto"):
+        raise ValueError("A must be SPD ...")
 
     cond_A, *_ = spectral_condition_number_spd(A)
 
@@ -446,7 +449,11 @@ def benchmark_preconditioners(A: np.ndarray,
     L_std = chol_factor(P_std)
     M_inv_std = apply_preconditioner_from_chol(L_std)
 
-    cond_std, lam_min_std, lam_max_std = cond_preconditioned(A, P_std)
+    if compute_conds:
+        cond_std, lam_min_std, lam_max_std = cond_preconditioned(A, P_std)
+    else:
+        cond_std, lam_min_std, lam_max_std = (np.nan, np.nan, np.nan)
+
 
     iters_std = []
     time_std = []
@@ -456,19 +463,26 @@ def benchmark_preconditioners(A: np.ndarray,
         time_std.append(res.runtime_sec)
 
     # --- mine ---
-    my = build_my_preconditioner(
-        A,
-        my_class,
-        tol=decomp_tol,
-        max_iter=decomp_max_iter,
-        method=decomp_method,
-        verbose=False,
-    )
+    try:
+        my = build_my_preconditioner(
+            A,
+            my_class,
+            tol=decomp_tol,
+            max_iter=decomp_max_iter,
+            method=decomp_method,
+            verbose=False,
+        )
+    except Exception as e:
+        print("  [Decomposition-based] failed:", repr(e))
+        my = None
     P_my = my.P
     L_my = chol_factor(P_my)
     M_inv_my = apply_preconditioner_from_chol(L_my)
 
-    cond_my, lam_min_my, lam_max_my = cond_preconditioned(A, P_my)
+    if compute_conds:
+        cond_my, lam_min_my, lam_max_my = cond_preconditioned(A, P_my)
+    else:
+        cond_my, lam_min_my, lam_max_my = (np.nan, np.nan, np.nan)
 
     iters_my = []
     time_my = []
@@ -515,15 +529,31 @@ def pretty_print_report(rep: BenchmarkReport) -> None:
 
     print("\n[Standard]")
     print(f"  class = {rep.standard_class}")
-    print(f"  eig(P^{-1/2} A P^{-1/2}) min/max = {rep.lam_min_standard:.3e} / {rep.lam_max_standard:.3e}")
-    print(f"  cond(P^{-1}A) = {rep.cond_PinvA_standard:.3e}")
+    if np.isfinite(rep.lam_min_standard) and np.isfinite(rep.lam_max_standard):
+        print(f"  eig(P^-0.5 A P^-0.5) min/max = {rep.lam_min_standard:.3e} / {rep.lam_max_standard:.3e}")
+    else:
+        print("  eig(P^-0.5 A P^-0.5) min/max = (skipped)")
+    if np.isfinite(rep.cond_PinvA_standard):
+        print(f"  cond(P^-1A) = {rep.cond_PinvA_standard:.3e}")
+    else:
+        print("  cond(P^-1A) = (skipped)")
+
+
     print(f"  PCG iters (median over RHS) = {rep.pcg_iters_standard_median:.1f}")
     print(f"  PCG time  (median over RHS) = {rep.pcg_time_standard_median:.3e} sec")
 
     print("\n[Decomposition-based]")
     print(f"  class = {rep.my_class}")
-    print(f"  eig(P^{-1/2} A P^{-1/2}) min/max = {rep.lam_min_my:.3e} / {rep.lam_max_my:.3e}")
-    print(f"  cond(P^{-1}A) = {rep.cond_PinvA_my:.3e}")
+    if np.isfinite(rep.lam_min_my) and np.isfinite(rep.lam_max_my):
+        print(f"  eig(P^-0.5 A P^-0.5) min/max = {rep.lam_min_my:.3e} / {rep.lam_max_my:.3e}")
+    else:
+        print("  eig(P^-0.5 A P^-0.5) min/max = (skipped)")
+
+    if np.isfinite(rep.cond_PinvA_my):
+        print(f"  cond(P^-1A) = {rep.cond_PinvA_my:.3e}")
+    else:
+        print("  cond(P^-1A) = (skipped)")
+
     print(f"  PCG iters (median over RHS) = {rep.pcg_iters_my_median:.1f}")
     print(f"  PCG time  (median over RHS) = {rep.pcg_time_my_median:.3e} sec")
     print(f"  build time (decomposition) = {rep.build_time_my:.3e} sec")
@@ -571,6 +601,7 @@ def benchmark_suite(n: int,
             decomp_tol=decomp_tol,
             decomp_max_iter=decomp_max_iter,
             decomp_method=decomp_method,
+            compute_conds=False,
         )
         rep.matrix_type = matrix_type
         rep.matrix_params = params
@@ -581,28 +612,36 @@ def benchmark_suite(n: int,
 
 
 if __name__ == "__main__":
-    # Default suite: include a "hard" case (fbm) plus model-matched cases (ar1, toeplitz, etc.)
-    n = 200
+    # Smaller n => much faster (both eigvalsh and PCG scale badly with n)
+    n = 80
 
+    # Deterministic structured cases (1 matrix each)
     cases = [
-        ("fbm", {"H": 0.8, "T": 1.0}),
         ("ar1", {"rho": 0.9}),
         ("ar1", {"rho": 0.5}),
+        ("toeplitz_ar1", {"rho": 0.9}),   # requires bc.spd_toeplitz_ar1 or bc.spd_toeplitz
+        ("fbm", {"H": 0.8, "T": 1.0}),    # deterministic; keep if you want, or remove if you already know it's bad
         ("hilbert", {}),
-        ("random_spd", {"cond": 1e4, "seed": 0}),
-        # ("toeplitz_exp", {"rho": 0.9}),  # uncomment if you have bc.spd_toeplitz_exp or bc.spd_toeplitz
     ]
 
+    # Add multiple random draws (many A's)
+    # random_spd and wishart accept seed -> will produce different matrices
+    for seed in range(5):  # change to 10/20 if you want more
+        cases.append(("random_spd", {"cond": 1e4, "seed": seed}))
+        cases.append(("wishart", {"df": n + 10, "seed": seed}))
+
+    # Faster CG settings (for quick compare)
     benchmark_suite(
         n=n,
         cases=cases,
         standard_class="tridiagonal",
         my_class="tridiagonal_markov",
         cg_tol=1e-8,
-        cg_max_iter=4000,
-        rhs_trials=5,
+        cg_max_iter=800,
+        rhs_trials=2,
         rhs_seed=0,
         decomp_tol=1e-6,
-        decomp_max_iter=500,
+        decomp_max_iter=200,
         decomp_method="newton",
     )
+
