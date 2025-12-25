@@ -1,0 +1,314 @@
+"""
+Command-line demo runner for constrained decomposition examples.
+
+Run:
+  python constrained_decomposition_demo.py --all --verbose
+"""
+
+import argparse
+import os
+import time
+import numpy as np
+
+from constrained_decomposition_core import (
+    SymBasis,
+    TridiagC_Basis,
+    constrained_decomposition,
+    constrained_decomposition_dual,
+    constrained_decomposition_group_invariant,
+    constrained_decomposition_circulant,
+    make_orthogonal_complement_basis,
+    spd_inverse,
+)
+
+from constrained_decomposition_matrices import (
+    spd_hilbert,
+    spd_toeplitz_ar1,
+    spd_brownian,
+    spd_gaussian_kernel,
+    spd_fractional_BM,
+    make_random_spd,
+    make_banded_spd,
+    make_offdiag_pair_basis,
+    make_banded_basis,
+    block_reynolds_project,
+    make_blocks,
+    make_block_fixed_spd,
+    make_block_fixed_basis_offdiag,
+)
+
+from constrained_decomposition_viz import plot_decomposition_heatmaps
+
+
+def time_solve(solve_fn, A, basis, **kwargs):
+    t0 = time.perf_counter()
+    sol = solve_fn(A, basis, **kwargs)
+    t1 = time.perf_counter()
+    return sol, (t1 - t0)
+def solve_primal(A, basis, method="newton", **kwargs):
+    B, C, x, info = constrained_decomposition(
+        A=A,
+        basis=basis,
+        method=method,
+        tol=1e-8,
+        max_iter=300,
+        verbose=verbose,
+        return_info=True,
+        **kwargs,
+    )
+    return {"B": B, "C": C, "x": x, "solver": f"primal-{method}", "info": info}
+def solve_dual(A, basis, basis_perp=None, log_prefix="", **kwargs):
+    # basis may be None for huge S (see small patch to dual solver)
+    B, C, y, basis_perp_out, info = constrained_decomposition_dual(
+        A=A,
+        basis=basis,
+        basis_perp=basis_perp,
+        tol=1e-8,
+        max_iter=300,
+        verbose=verbose,
+        return_info=True,
+        log_prefix=log_prefix,
+        **kwargs,
+    )
+    return {"B": B, "C": C, "x": y, "solver": "dual", "basis_perp": basis_perp_out, "info": info}
+
+
+
+if __name__ == "__main__":
+    np.set_printoptions(precision=3, suppress=True)
+
+    # ============================================================
+    # PyCharm defaults (used when no CLI args override them)
+    # ============================================================
+    DEFAULT_RUN = {
+        "demo1_primal_smallS": True,
+        "demo2_dual_antibanded": True,
+        "demo3_block_group": True,
+        "demo4_banded_A_newton": True,
+        "demo5_banded_A_quasi": True,
+    }
+    DEFAULT_OUTDIR = "demo_outputs"
+    DEFAULT_VERBOSE = True
+
+    # ============================================================
+    # CLI parsing (overrides defaults when provided)
+    # ============================================================
+    parser = argparse.ArgumentParser(
+        description="Constrained decomposition demos: primal / dual / group-invariant / banded."
+    )
+    parser.add_argument("--outdir", type=str, default=None, help="Directory to save plots.")
+    parser.add_argument("--verbose", action="store_true", help="Verbose solver output.")
+    parser.add_argument("--all", action="store_true", help="Run all demos.")
+    parser.add_argument(
+        "--run",
+        type=str,
+        default=None,
+        help="Comma-separated list of demos to run. Options: "
+             "demo1_primal_smallS,demo2_dual_antibanded,demo3_block_group,"
+             "demo4_banded_A_newton,demo5_banded_A_quasi"
+    )
+
+    # demo sizes
+    parser.add_argument("--n1", type=int, default=40, help="n for demo1 (general A, small S, primal).")
+    parser.add_argument("--n2", type=int, default=120, help="n for demo2 (dual on banded S^perp).")
+    parser.add_argument("--n3", type=int, default=200, help="n for demo3 (block-permutation group).")
+    parser.add_argument("--n4", type=int, default=300, help="n for demo4/5 (banded A + banded S).")
+
+    # parameters
+    parser.add_argument("--blocks", type=int, default=5, help="Number of blocks r for demo3.")
+    parser.add_argument("--bandwidth4", type=int, default=2, help="Half-bandwidth b for demo4/5 banded A and S.")
+    parser.add_argument("--bandwidth2", type=int, default=1, help="Half-bandwidth b for demo2 S^perp (b=1 => tridiag).")
+
+    args = parser.parse_args()
+
+    # Decide which demos to run
+    run_flags = dict(DEFAULT_RUN)
+    if args.all:
+        for k in run_flags:
+            run_flags[k] = True
+    if args.run is not None:
+        for k in run_flags:
+            run_flags[k] = False
+        chosen = [s.strip() for s in args.run.split(",") if s.strip()]
+        for name in chosen:
+            if name not in run_flags:
+                raise ValueError(f"Unknown demo '{name}'. Valid: {list(run_flags.keys())}")
+            run_flags[name] = True
+
+    outdir = args.outdir if args.outdir is not None else DEFAULT_OUTDIR
+    os.makedirs(outdir, exist_ok=True)
+
+    # IMPORTANT: solve_primal / solve_dual use the GLOBAL variable `verbose`
+    globals()["verbose"] = bool(args.verbose or DEFAULT_VERBOSE)
+
+    # ============================================================
+    # Cache demo3 build (so we don't call make_block_fixed_spd twice)
+    # ============================================================
+    _demo3_cache = {"built": False, "A": None, "basis": None}
+    def build_demo3_once():
+        if not _demo3_cache["built"]:
+            A3, blocks3 = make_block_fixed_spd(args.n3, r=args.blocks, seed=2)
+            basis3 = make_block_fixed_basis_offdiag(args.n3, blocks3)
+            _demo3_cache["A"] = A3
+            _demo3_cache["basis"] = basis3
+            _demo3_cache["built"] = True
+        return _demo3_cache["A"], _demo3_cache["basis"]
+
+    # ============================================================
+    # Cache demo4/5 build (same A,basis for fair Newton vs quasi compare)
+    # ============================================================
+    _demo45_cache = {"built": False, "A": None, "basis": None}
+    def build_demo45_once():
+        if not _demo45_cache["built"]:
+            A4 = make_banded_spd(args.n4, b=args.bandwidth4, seed=3, diag_boost=8.0)
+            basis4 = make_banded_basis(args.n4, b=args.bandwidth4, include_diag=False)
+            _demo45_cache["A"] = A4
+            _demo45_cache["basis"] = basis4
+            _demo45_cache["built"] = True
+        return _demo45_cache["A"], _demo45_cache["basis"]
+
+    # ============================================================
+    # Demo specs
+    # Each build returns (A, basis, solver_kwargs)
+    # ============================================================
+    demos = [
+        {
+            "name": "demo1_primal_smallS",
+            "title": "General SPD A + small S (few offdiag constraints)  (primal)",
+            "A_type": "dense_random_spd",
+            "S_type": "small explicit constraints",
+            "solver": "primal-newton",
+            "build": lambda: (
+                make_random_spd(args.n1, seed=0),
+                make_offdiag_pair_basis(args.n1, pairs=[(0, 1), (1, 2), (2, 3), (0, 3), (5, 7)]),
+                {"method": "newton"},
+            ),
+            "solve": solve_primal,
+            "plot_file": "demo1_primal_smallS.png",
+        },
+        {
+            "name": "demo2_dual_antibanded",
+            "title": "General SPD A + anti-banded S (implicit), S^perp banded (small)  (dual)",
+            "A_type": "dense_random_spd",
+            "S_type": "anti-banded S (implicit); basis is S^perp banded",
+            "solver": "dual-newton",
+            "build": lambda: (
+                make_random_spd(args.n2, seed=1),
+                None,  # huge S not materialized
+                {"basis_perp": make_banded_basis(args.n2, b=args.bandwidth2, include_diag=True)},
+            ),
+            "solve": solve_dual,
+            "plot_file": "demo2_dual_antibanded.png",
+        },
+        {
+            "name": "demo3_block_group",
+            "title": "Group-invariant block-permutation A + reduced S^G (block-constant offdiag)  (primal)",
+            "A_type": "block-permutation invariant",
+            "S_type": "group-reduced (block-constant offdiag)",
+            "solver": "primal-newton (group-reduced)",
+            "build": lambda: (
+                build_demo3_once()[0],
+                build_demo3_once()[1],
+                {"method": "newton"},
+            ),
+            "solve": solve_primal,
+            "plot_file": "demo3_block_group.png",
+        },
+        {
+            "name": "demo4_banded_A_newton",
+            "title": "Banded SPD A + banded S (same bandwidth)  (primal NEWTON)",
+            "A_type": "banded_spd",
+            "S_type": "banded constraints (same bandwidth)",
+            "solver": "primal-newton",
+            "build": lambda: (
+                build_demo45_once()[0],
+                build_demo45_once()[1],
+                {"method": "newton"},
+            ),
+            "solve": solve_primal,
+            "plot_file": "demo4_banded_A_newton.png",
+        },
+        {
+            "name": "demo5_banded_A_quasi",
+            "title": "Banded SPD A + banded S (same bandwidth)  (primal QUASI-NEWTON)",
+            "A_type": "banded_spd",
+            "S_type": "banded constraints (same bandwidth)",
+            "solver": "primal-quasi-newton",
+            "build": lambda: (
+                build_demo45_once()[0],
+                build_demo45_once()[1],
+                {"method": "quasi-newton"},
+            ),
+            "solve": solve_primal,
+            "plot_file": "demo5_banded_A_quasi.png",
+        },
+    ]
+
+    # ============================================================
+    # Run loop (ONE solve call site + ONE plot call site)
+    # ============================================================
+    any_ran = False
+    for spec in demos:
+        if not run_flags.get(spec["name"], False):
+            continue
+        any_ran = True
+
+        A, basis, solver_kwargs = spec["build"]()
+        # --- print header BEFORE solve so verbose output is contextual
+        print("\n" + "=" * 72)
+        print(f"[{spec['name']}] {spec['title']}")
+        print(f"A_type={spec.get('A_type', '?')}, S_type={spec.get('S_type', '?')}")
+        print(f"n={A.shape[0]}, m={getattr(basis, 'm', 'implicit/NA')}, solver={spec.get('solver_tag', '?')}")
+
+        # pass a prefix so iteration lines include the demo name
+        solver_kwargs = dict(solver_kwargs)
+        solver_kwargs["log_prefix"] = f"[{spec['name']}] "
+
+        sol, elapsed = time_solve(spec["solve"], A, basis, **solver_kwargs)
+
+        B, C = sol["B"], sol["C"]
+
+        # reconstruction diagnostic
+        recon = np.linalg.norm(A - (spd_inverse(B) + C), ord="fro")
+
+        # choose basis for trace check and plotting:
+        # - if primal: basis is the constraint basis
+        # - if dual with basis=None: basis_perp exists in sol and is usable for trace/plotting
+        basis_for_check = basis if basis is not None else sol.get("basis_perp", None)
+        if basis_for_check is not None and hasattr(basis_for_check, "trace_with"):
+            if basis is not None:
+                # primal: constraints are tr(B Dk)=0
+                max_trace = float(np.max(np.abs(basis_for_check.trace_with(B))))
+                max_trace_label = "max|tr(BDk)|"
+                residual_on = "B"
+            else:
+                # dual: constraints/stationarity are tr((A-B^{-1}) Ek)=0, i.e. tr(C Ek)=0
+                max_trace = float(np.max(np.abs(basis_for_check.trace_with(C))))
+                max_trace_label = "max|tr(CEk)|"
+                residual_on = "C"
+        else:
+            max_trace = float("nan")
+            max_trace_label = "max|trace|"
+            residual_on = "B"
+
+        info = sol.get("info", {})
+        iters = info.get("iters", "?")
+        backtracks = info.get("backtracks", "?")
+
+        print("\n" + "=" * 72)
+        print(f"[{spec['name']}] {spec['title']}")
+        print(f"n={A.shape[0]}, m={getattr(basis, 'm', 'implicit/NA')}, solver={sol.get('solver','?')}")
+        print(f"time={elapsed:.4f}s, iters={iters}, backtracks={backtracks}, recon_fro={recon:.3e}, {max_trace_label}={max_trace:.3e}")
+
+        # plot (use basis_for_check so demo2 doesn't crash)
+        plot_path = os.path.join(outdir, spec["plot_file"])
+        plot_decomposition_heatmaps(
+            A, B, C, basis_for_check,
+            filename=plot_path,
+            add_title=True,
+            residual_on=residual_on
+        )
+        print(f"saved plot -> {plot_path}")
+
+    if not any_ran:
+        print("Nothing selected. Use --all or --run demo1_primal_smallS,...")

@@ -1,5 +1,5 @@
-from constrained_decomposition_utils import *
-from constrained_decomposition_general import constrained_decomposition, TridiagC_Basis
+from constrained_decomposition_core import *
+from constrained_decomposition_matrices import *
 import matplotlib.pyplot as plt
 from pathlib import Path
 

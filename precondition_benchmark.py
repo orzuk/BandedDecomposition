@@ -35,8 +35,8 @@ from typing import Callable, Dict, List, Optional, Tuple, Any
 import numpy as np
 
 # ---- Import your existing code (same folder or PYTHONPATH) ----
-import constrained_decomposition_utils as bc
-from constrained_decomposition_general import constrained_decomposition, TridiagC_Basis
+import constrained_decomposition_core as bc
+from constrained_decomposition_matrices import *
 
 
 # -----------------------------

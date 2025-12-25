@@ -1,24 +1,66 @@
-import argparse
-import os
-import time
+"""
+Core algorithms and data structures for constrained SPD decompositions.
+
+This module contains:
+  - Symmetric subspace bases (dense/sparse/circulant/tridiagonal parameterizations)
+  - Primal and dual solvers (Newton / quasi-Newton / gradient)
+  - Group-invariant and circulant specializations
+  - Core linear-algebra helpers (SPD checks, inverse, etc.)
+
+It is intentionally free of demo/CLI/plotting code.
+"""
+
+
 import numpy as np
-from constrained_decomposition_utils import *
 
 
-# ============================================================
-# Utilities
-# ============================================================
+
+def is_spd(M, sym_tol=1e-12, jitter=0.0):
+    """
+    Robust SPD check:
+      - symmetrize first (removes tiny asymmetry)
+      - optional diagonal jitter (helps near-boundary SPD)
+      - then Cholesky
+    """
+    M = np.asarray(M, dtype=float)
+    M = 0.5 * (M + M.T)
+
+    # Optional: if you still want a symmetry diagnostic, do it after symmetrizing
+    # but don't use it as a hard failure condition.
+    if sym_tol is not None:
+        # relative-ish symmetry check
+        if np.linalg.norm(M - M.T, ord="fro") > sym_tol * np.linalg.norm(M, ord="fro"):
+            return False  # this is now basically never triggered after sym()
+
+    n = M.shape[0]
+    if jitter == "auto":
+        jitter = 1e-12 * (np.trace(M) / n)  # scale-aware tiny diagonal bump
+
+    try:
+        np.linalg.cholesky(M + (jitter * np.eye(n) if jitter else 0.0))
+        return True
+    except np.linalg.LinAlgError:
+        return False
+
+def spd_inverse(A):
+    """
+    Numerically stable inverse for SPD matrices using Cholesky solves.
+    Returns a symmetrized inverse.
+    """
+    A = np.asarray(A, dtype=float)
+    A = 0.5 * (A + A.T)
+    L = np.linalg.cholesky(A)
+    I = np.eye(A.shape[0])
+    Y = np.linalg.solve(L, I)
+    A_inv = np.linalg.solve(L.T, Y)
+    return 0.5 * (A_inv + A_inv.T)
+
 
 
 
 
 def _logdet_spd_from_cholesky(L):
     return 2.0 * np.sum(np.log(np.diag(L)))
-
-
-# ============================================================
-# Basis representations for S = span(D1,...,Dm)
-# ============================================================
 
 class SymBasis:
     """
@@ -180,13 +222,6 @@ class SymBasis:
         H = 0.5 * (H + H.T)
         return H
 
-
-
-
-# ============================================================
-# Circulant speedups (cyclic group invariance)
-# ============================================================
-
 def is_circulant(A, tol=1e-10):
     """
     Check if A is (approximately) circulant: each row is a cyclic shift of the first row.
@@ -200,7 +235,6 @@ def is_circulant(A, tol=1e-10):
             return False
     return True
 
-
 def circulant_from_first_col(c):
     """
     Build the dense circulant matrix with first column c (length n).
@@ -213,7 +247,6 @@ def circulant_from_first_col(c):
         M[:, j] = np.roll(c, j)
     return M
 
-
 def circulant_eigs_from_first_col(c):
     """
     Eigenvalues of circulant matrix from its first column, using numpy FFT convention.
@@ -222,7 +255,6 @@ def circulant_eigs_from_first_col(c):
     c = np.asarray(c, dtype=float).ravel()
     return np.fft.fft(c)
 
-
 def circulant_first_col_from_eigs(lam):
     """
     First column of circulant matrix from its eigenvalues (inverse FFT).
@@ -230,7 +262,6 @@ def circulant_first_col_from_eigs(lam):
     lam = np.asarray(lam)
     c = np.fft.ifft(lam)
     return np.real(c)
-
 
 class CirculantSymBasis(SymBasis):
     """
@@ -292,7 +323,6 @@ class CirculantSymBasis(SymBasis):
         c = self.build_C_first_col(x)
         return circulant_from_first_col(c)
 
-
 def phi_grad_hess_spd_circulant(A, x, basis: CirculantSymBasis, order=1,
                                spd_eig_tol=1e-12, return_dense=True):
     """
@@ -343,11 +373,6 @@ def phi_grad_hess_spd_circulant(A, x, basis: CirculantSymBasis, order=1,
 
     return phi, g, H, B, C, M, None
 
-
-# ============================================================
-# Specialized basis: the original tridiagonal C(x) case
-# ============================================================
-
 class TridiagC_Basis(SymBasis):
     """
     Your specialized case:
@@ -392,7 +417,6 @@ class TridiagC_Basis(SymBasis):
 
     def hessian_from_B(self, B):
         return hessian_phi_spd_from_B(B)
-
 
 def hessian_phi_spd_from_B(B):
     """
@@ -448,11 +472,6 @@ def hessian_phi_spd_from_B(B):
 
     return H
 
-
-# ============================================================
-# Phi / gradient / Hessian evaluation
-# ============================================================
-
 def phi_grad_hess_spd(A, x, basis: SymBasis, order=1):
     """
     For the convex SPD formulation in your note:
@@ -506,11 +525,6 @@ def phi_only_spd(A, x, basis: SymBasis):
     phi = -_logdet_spd_from_cholesky(L)
     return phi
 
-
-# ============================================================
-# Main optimization routine
-# ============================================================
-
 def constrained_decomposition(
     A,
     basis: SymBasis,
@@ -524,6 +538,7 @@ def constrained_decomposition(
     newton_damping=1e-10,
     max_backtracks=60,
     max_m_for_full_hessian=500,
+    log_prefix="",
     return_info=False
 ):
     """
@@ -544,6 +559,8 @@ def constrained_decomposition(
       - Otherwise, Newton will form a full Hessian which is only practical when m is small.
         If m is large, prefer method="quasi-newton".
     """
+    # Prefix for all verbose logging produced by this solver (e.g. per-demo tags).
+    pfx = log_prefix or ""
     A = np.asarray(A, dtype=float)
     n = A.shape[0]
     if A.shape != (n, n):
@@ -574,7 +591,7 @@ def constrained_decomposition(
         min_diag_L = np.nan  # or 1.0, or just skip this diagnostic
 
     if verbose:
-        print(f"...  min(diag(L))={min_diag_L:.3e}")
+        print(f"{pfx}...  min(diag(L))={min_diag_L:.3e}")
 
     if method == "quasi-newton":
         H_BFGS = np.eye(m)
@@ -588,11 +605,11 @@ def constrained_decomposition(
         max_abs_g = float(np.max(np.abs(g)))
         if verbose:
 #            lam_min = float(np.min(np.linalg.eigvalsh(M)))
-            print(f"iter {it:4d}  phi={phi: .6e}  ||g||={g_norm: .3e}  max|g|={max_abs_g: .3e} ") #  lam_min(A-C)={lam_min: .3e}")
+            print(f"{pfx}iter {it:4d}  phi={phi: .6e}  ||g||={g_norm: .3e}  max|g|={max_abs_g: .3e} ") #  lam_min(A-C)={lam_min: .3e}")
 
         if max_abs_g < tol:
             if verbose:
-                print(f"Converged: max|tr(B Dk)|={max_abs_g:.3e} < tol={tol}")
+                print(f"{pfx}Converged: max|tr(B Dk)|={max_abs_g:.3e} < tol={tol}")
             break
 
         # Search direction
@@ -605,7 +622,7 @@ def constrained_decomposition(
         else:  # newton
             # Hessian may be large to form; allow user control
             if H is None:
-                print("None H !!! Aborting !!!")
+                print(f"{pfx}None H !!! Aborting !!!")
                 return None
 #                H = basis.hessian_from_B(B)
 #                if H is None:
@@ -626,14 +643,14 @@ def constrained_decomposition(
             else:
                 # fallback
                 if verbose:
-                    print("  Newton Hessian not SPD even after damping; fallback to -g.")
+                    print(f"{pfx}  Newton Hessian not SPD even after damping; fallback to -g.")
                 d = -g
 
         # Ensure descent direction
         gTd = float(g @ d)
         if gTd >= 0:
             if verbose:
-                print("  Non-descent direction; using -g.")
+                print(f"{pfx}  Non-descent direction; using -g.")
             d = -g
             gTd = float(g @ d)
 
@@ -661,7 +678,7 @@ def constrained_decomposition(
 
         if not accepted:
             if verbose:
-                print("Backtracking failed; stopping.")
+                print(f"{pfx}Backtracking failed; stopping.")
             break
 
         # We accepted x_try based on phi-only test.
@@ -707,11 +724,6 @@ def constrained_decomposition(
 
     return B, C, x
 
-
-# ============================================================
-# Example: build a generic sparse basis from COO
-# ============================================================
-
 def make_coo_basis_from_sparse_patterns(n, patterns):
     """
     Helper for creating a SymBasis from patterns.
@@ -726,14 +738,6 @@ def make_coo_basis_from_sparse_patterns(n, patterns):
         vals = [t[2] for t in triplets]
         coo.append((np.array(rows, dtype=int), np.array(cols, dtype=int), np.array(vals, dtype=float)))
     return SymBasis(n=n, coo_mats=coo)
-
-
-
-
-# ============================================================
-# Dual + group-invariant extensions
-# ============================================================
-
 
 def _sym_upper_indices(n: int):
     """Return arrays (rows, cols) for i<=j in row-major order."""
@@ -782,7 +786,6 @@ def _orthonormalize_dense_sym_basis(mats, atol=1e-12):
     # Orthonormal basis vectors in the column space:
     Q = U[:, keep]  # columns orthonormal
     return [_sym_unvec(Q[:, i], n) for i in range(Q.shape[1])]
-
 
 def _phi_grad_hess_dual(A, y, basis_perp: SymBasis, order=1):
     """
@@ -890,7 +893,6 @@ def _find_feasible_dual_start(A, basis_perp: SymBasis, tries=30, jitter=1e-6, rn
 
     raise RuntimeError("Could not find feasible starting point for dual (B(y) SPD).")
 
-
 def make_orthogonal_complement_basis(basis: SymBasis, atol=1e-12, name=None):
     """
     Construct a dense SymBasis spanning S^\perp where S = span(D1,...,Dm)
@@ -966,8 +968,6 @@ def project_onto_subspace(M, basis: SymBasis, gram_inv=None):
         P += coeffs[k] * Dmats[k]
     return P, coeffs
 
-
-
 def constrained_decomposition_dual(
     A,
     basis: SymBasis,
@@ -981,6 +981,7 @@ def constrained_decomposition_dual(
     newton_damping=1e-10,
     max_backtracks=60,
     atol_perp=1e-12,
+    log_prefix="",
     return_info=False
 ):
     """
@@ -1003,6 +1004,8 @@ def constrained_decomposition_dual(
         C ∈ S and A ≈ B^{-1} + C
         y are the coordinates of B in basis_perp.
     """
+    # Prefix for all verbose logging produced by this solver (e.g. per-demo tags).
+    pfx = log_prefix or ""
     A = np.asarray(A, dtype=float)
     n = A.shape[0]
     if not is_spd(A):
@@ -1041,11 +1044,11 @@ def constrained_decomposition_dual(
         g_norm = float(np.linalg.norm(g))
         max_abs_g = float(np.max(np.abs(g))) if g.size else 0.0
         if verbose:
-            print(f"[dual] iter {it:4d}  psi={psi: .6e}  ||g||={g_norm: .3e}  max|g|={max_abs_g: .3e}")
+            print(f"{pfx}[dual] iter {it:4d}  psi={psi: .6e}  ||g||={g_norm: .3e}  max|g|={max_abs_g: .3e}")
 
         if max_abs_g < tol:
             if verbose:
-                print(f"[dual] Converged: max|grad|={max_abs_g:.3e} < tol={tol}")
+                print(f"{pfx}[dual] Converged: max|grad|={max_abs_g:.3e} < tol={tol}")
             break
 
         p = basis_perp.m
@@ -1088,7 +1091,7 @@ def constrained_decomposition_dual(
 
         if not accepted:
             if verbose:
-                print("[dual] Backtracking failed; stopping.")
+                print(f"{pfx}[dual] Backtracking failed; stopping.")
             break
 
         psi, g, H, B, Binv, L = _phi_grad_hess_dual(A, y_try, basis_perp, order=2)
@@ -1117,11 +1120,6 @@ def constrained_decomposition_dual(
     if return_info:
         return B, C, y, basis_perp, info
     return B, C, y, basis_perp
-
-
-# ============================================================
-# Group invariance utilities
-# ============================================================
 
 def _as_perm_matrix(perm, n):
     """perm can be (n,) int array representing a permutation, or an (n,n) matrix."""
@@ -1229,14 +1227,6 @@ def constrained_decomposition_group_invariant(
 
     raise ValueError("solver must be 'primal' or 'dual'.")
 
-
-
-# ============================================================
-# Convenience: solve directly in circulant subspace using FFT speedups
-# ============================================================
-
-import numpy as np
-
 def make_symmetric_first_col_from_half(half, n):
     half = np.asarray(half, dtype=float)  # length n//2+1 when n even
     if n % 2 == 0:
@@ -1256,7 +1246,6 @@ def shift_to_spd_full_first_col(first_col, eps=1e-9):
     if min_lam <= eps:
         a[0] += (eps - min_lam)       # shift all eigenvalues up so min is eps
     return a
-
 
 def constrained_decomposition_circulant(
     A,
@@ -1285,390 +1274,3 @@ def constrained_decomposition_circulant(
         **kwargs,
     )
     return B, C, x, basis
-
-
-# ============================================================
-# Helpers
-# ============================================================
-def make_random_spd(n: int, seed: int = 0, diag_boost: float = 2.0) -> np.ndarray:
-    rng = np.random.default_rng(seed)
-    M = rng.standard_normal((n, n))
-    A = M @ M.T + (diag_boost * n) * np.eye(n)
-    return 0.5 * (A + A.T)
-
-def make_banded_spd(n: int, b: int, seed: int = 0, diag_boost: float = 5.0) -> np.ndarray:
-    """
-    Dense representation of a symmetric banded SPD matrix (bandwidth b).
-    (In code we still store dense; structure is in the pattern.)
-    """
-    rng = np.random.default_rng(seed)
-    A = np.zeros((n, n), dtype=float)
-    for k in range(b + 1):
-        v = rng.standard_normal(n - k)
-        if k == 0:
-            A += np.diag(v)
-        else:
-            A += np.diag(v, k) + np.diag(v, -k)
-    # boost diagonal to ensure SPD
-    A += (diag_boost * (b + 1)) * np.eye(n)
-    return 0.5 * (A + A.T)
-
-def make_offdiag_pair_basis(n: int, pairs):
-    mats = []
-    for (i, j) in pairs:
-        D = np.zeros((n, n), dtype=float)
-        D[i, j] = 1.0
-        D[j, i] = 1.0
-        mats.append(D)
-    return SymBasis(n=n, dense_mats=mats, name=f"offdiag_pairs_m={len(mats)}")
-
-def make_banded_basis(n: int, b: int, include_diag: bool = True):
-    """
-    Basis for symmetric banded matrices with half-bandwidth b.
-    include_diag=True => includes diagonal E_ii.
-    """
-    mats = []
-    if include_diag:
-        for i in range(n):
-            D = np.zeros((n, n), dtype=float)
-            D[i, i] = 1.0
-            mats.append(D)
-    for k in range(1, b + 1):
-        for i in range(n - k):
-            j = i + k
-            D = np.zeros((n, n), dtype=float)
-            D[i, j] = 1.0
-            D[j, i] = 1.0
-            mats.append(D)
-    return SymBasis(n, dense_mats=mats, name=f"banded(b={b}, diag={include_diag})")
-
-
-def block_reynolds_project(A: np.ndarray, blocks):
-    """
-    Project a matrix onto the block-permutation fixed space:
-    entries become constant on each (block_i, block_j) rectangle.
-    """
-    n = A.shape[0]
-    A = 0.5 * (A + A.T)
-    out = np.zeros_like(A)
-    for bi, I in enumerate(blocks):
-        for bj, J in enumerate(blocks):
-            sub = A[np.ix_(I, J)]
-            out[np.ix_(I, J)] = np.mean(sub)
-    out = 0.5 * (out + out.T)
-    return out
-
-def make_blocks(n: int, r: int):
-    """
-    Partition {0,...,n-1} into r contiguous blocks (sizes differ by at most 1).
-    """
-    r = int(r)
-    if r < 1 or r > n:
-        raise ValueError("blocks r must satisfy 1 <= r <= n")
-    sizes = [n // r] * r
-    for t in range(n % r):
-        sizes[t] += 1
-    blocks = []
-    start = 0
-    for sz in sizes:
-        blocks.append(list(range(start, start + sz)))
-        start += sz
-    return blocks
-
-def make_block_fixed_spd(n: int, r: int, seed: int = 0):
-    """
-    Create a random SPD A and Reynolds-project it to be fixed under block-permutations.
-    """
-    A0 = make_random_spd(n, seed=seed, diag_boost=2.0)
-    blocks = make_blocks(n, r)
-    A = block_reynolds_project(A0, blocks)
-    # ensure strictly SPD by diagonal shift if needed
-    lam_min = float(np.min(np.linalg.eigvalsh(A)))
-    if lam_min <= 1e-8:
-        A = A + (abs(lam_min) + 1e-2) * np.eye(n)
-    return A, blocks
-
-def make_block_fixed_basis_offdiag(n: int, blocks):
-    """
-    Build a *small* basis for S^G consisting of block-constant OFF-DIAGONAL patterns:
-      - one matrix per block: within-block off-diagonal entries = 1 (diag=0)
-      - one matrix per block-pair: between-block entries = 1 (both rectangles)
-    This ensures S ∩ SPSD = {0} (zero diagonal).
-    """
-    mats = []
-
-    # within-block off-diagonal
-    for I in blocks:
-        D = np.zeros((n, n), dtype=float)
-        for a in I:
-            for b in I:
-                if a != b:
-                    D[a, b] = 1.0
-        mats.append(D)
-
-    # between blocks
-    for bi in range(len(blocks)):
-        for bj in range(bi + 1, len(blocks)):
-            I = blocks[bi]
-            J = blocks[bj]
-            D = np.zeros((n, n), dtype=float)
-            for a in I:
-                for b in J:
-                    D[a, b] = 1.0
-                    D[b, a] = 1.0
-            mats.append(D)
-
-    return SymBasis(n=n, dense_mats=mats, name=f"block_fixed_offdiag_r={len(blocks)}_m={len(mats)}")
-
-def time_solve(solve_fn, A, basis, **kwargs):
-    t0 = time.perf_counter()
-    sol = solve_fn(A, basis, **kwargs)
-    t1 = time.perf_counter()
-    return sol, (t1 - t0)
-
-# ============================================================
-# Unified solvers (single call site style)
-# ============================================================
-def solve_primal(A, basis, method="newton", **kwargs):
-    B, C, x, info = constrained_decomposition(
-        A=A,
-        basis=basis,
-        method=method,
-        tol=1e-8,
-        max_iter=300,
-        verbose=verbose,
-        return_info=True,
-        **kwargs,
-    )
-    return {"B": B, "C": C, "x": x, "solver": f"primal-{method}", "info": info}
-
-
-def solve_dual(A, basis, basis_perp=None):
-    # basis may be None for huge S (see small patch to dual solver)
-    B, C, y, basis_perp_out, info = constrained_decomposition_dual(
-        A=A,
-        basis=basis,
-        basis_perp=basis_perp,
-        tol=1e-8,
-        max_iter=300,
-        verbose=verbose,
-        return_info=True
-    )
-    return {"B": B, "C": C, "x": y, "solver": "dual", "basis_perp": basis_perp_out, "info": info}
-
-
-
-if __name__ == "__main__":
-    np.set_printoptions(precision=3, suppress=True)
-
-    # ============================================================
-    # PyCharm defaults (used when no CLI args override them)
-    # ============================================================
-    DEFAULT_RUN = {
-        "demo1_primal_smallS": True,
-        "demo2_dual_antibanded": True,
-        "demo3_block_group": True,
-        "demo4_banded_A_newton": True,
-        "demo5_banded_A_quasi": True,
-    }
-    DEFAULT_OUTDIR = "demo_outputs"
-    DEFAULT_VERBOSE = True
-
-    # ============================================================
-    # CLI parsing (overrides defaults when provided)
-    # ============================================================
-    parser = argparse.ArgumentParser(
-        description="Constrained decomposition demos: primal / dual / group-invariant / banded."
-    )
-    parser.add_argument("--outdir", type=str, default=None, help="Directory to save plots.")
-    parser.add_argument("--verbose", action="store_true", help="Verbose solver output.")
-    parser.add_argument("--all", action="store_true", help="Run all demos.")
-    parser.add_argument(
-        "--run",
-        type=str,
-        default=None,
-        help="Comma-separated list of demos to run. Options: "
-             "demo1_primal_smallS,demo2_dual_antibanded,demo3_block_group,"
-             "demo4_banded_A_newton,demo5_banded_A_quasi"
-    )
-
-    # demo sizes
-    parser.add_argument("--n1", type=int, default=40, help="n for demo1 (general A, small S, primal).")
-    parser.add_argument("--n2", type=int, default=120, help="n for demo2 (dual on banded S^perp).")
-    parser.add_argument("--n3", type=int, default=200, help="n for demo3 (block-permutation group).")
-    parser.add_argument("--n4", type=int, default=300, help="n for demo4/5 (banded A + banded S).")
-
-    # parameters
-    parser.add_argument("--blocks", type=int, default=5, help="Number of blocks r for demo3.")
-    parser.add_argument("--bandwidth4", type=int, default=2, help="Half-bandwidth b for demo4/5 banded A and S.")
-    parser.add_argument("--bandwidth2", type=int, default=1, help="Half-bandwidth b for demo2 S^perp (b=1 => tridiag).")
-
-    args = parser.parse_args()
-
-    # Decide which demos to run
-    run_flags = dict(DEFAULT_RUN)
-    if args.all:
-        for k in run_flags:
-            run_flags[k] = True
-    if args.run is not None:
-        for k in run_flags:
-            run_flags[k] = False
-        chosen = [s.strip() for s in args.run.split(",") if s.strip()]
-        for name in chosen:
-            if name not in run_flags:
-                raise ValueError(f"Unknown demo '{name}'. Valid: {list(run_flags.keys())}")
-            run_flags[name] = True
-
-    outdir = args.outdir if args.outdir is not None else DEFAULT_OUTDIR
-    os.makedirs(outdir, exist_ok=True)
-
-    # IMPORTANT: solve_primal / solve_dual use the GLOBAL variable `verbose`
-    globals()["verbose"] = bool(args.verbose or DEFAULT_VERBOSE)
-
-    # ============================================================
-    # Cache demo3 build (so we don't call make_block_fixed_spd twice)
-    # ============================================================
-    _demo3_cache = {"built": False, "A": None, "basis": None}
-    def build_demo3_once():
-        if not _demo3_cache["built"]:
-            A3, blocks3 = make_block_fixed_spd(args.n3, r=args.blocks, seed=2)
-            basis3 = make_block_fixed_basis_offdiag(args.n3, blocks3)
-            _demo3_cache["A"] = A3
-            _demo3_cache["basis"] = basis3
-            _demo3_cache["built"] = True
-        return _demo3_cache["A"], _demo3_cache["basis"]
-
-    # ============================================================
-    # Cache demo4/5 build (same A,basis for fair Newton vs quasi compare)
-    # ============================================================
-    _demo45_cache = {"built": False, "A": None, "basis": None}
-    def build_demo45_once():
-        if not _demo45_cache["built"]:
-            A4 = make_banded_spd(args.n4, b=args.bandwidth4, seed=3, diag_boost=8.0)
-            basis4 = make_banded_basis(args.n4, b=args.bandwidth4, include_diag=False)
-            _demo45_cache["A"] = A4
-            _demo45_cache["basis"] = basis4
-            _demo45_cache["built"] = True
-        return _demo45_cache["A"], _demo45_cache["basis"]
-
-    # ============================================================
-    # Demo specs
-    # Each build returns (A, basis, solver_kwargs)
-    # ============================================================
-    demos = [
-        {
-            "name": "demo1_primal_smallS",
-            "title": "General SPD A + small S (few offdiag constraints)  (primal)",
-            "build": lambda: (
-                make_random_spd(args.n1, seed=0),
-                make_offdiag_pair_basis(args.n1, pairs=[(0, 1), (1, 2), (2, 3), (0, 3), (5, 7)]),
-                {"method": "newton"},
-            ),
-            "solve": solve_primal,
-            "plot_file": "demo1_primal_smallS.png",
-        },
-        {
-            "name": "demo2_dual_antibanded",
-            "title": "General SPD A + anti-banded S (implicit), S^perp banded (small)  (dual)",
-            "build": lambda: (
-                make_random_spd(args.n2, seed=1),
-                None,  # huge S not materialized
-                {"basis_perp": make_banded_basis(args.n2, b=args.bandwidth2, include_diag=True)},
-            ),
-            "solve": solve_dual,
-            "plot_file": "demo2_dual_antibanded.png",
-        },
-        {
-            "name": "demo3_block_group",
-            "title": "Group-invariant block-permutation A + reduced S^G (block-constant offdiag)  (primal)",
-            "build": lambda: (
-                build_demo3_once()[0],
-                build_demo3_once()[1],
-                {"method": "newton"},
-            ),
-            "solve": solve_primal,
-            "plot_file": "demo3_block_group.png",
-        },
-        {
-            "name": "demo4_banded_A_newton",
-            "title": "Banded SPD A + banded S (same bandwidth)  (primal NEWTON)",
-            "build": lambda: (
-                build_demo45_once()[0],
-                build_demo45_once()[1],
-                {"method": "newton"},
-            ),
-            "solve": solve_primal,
-            "plot_file": "demo4_banded_A_newton.png",
-        },
-        {
-            "name": "demo5_banded_A_quasi",
-            "title": "Banded SPD A + banded S (same bandwidth)  (primal QUASI-NEWTON)",
-            "build": lambda: (
-                build_demo45_once()[0],
-                build_demo45_once()[1],
-                {"method": "quasi-newton"},
-            ),
-            "solve": solve_primal,
-            "plot_file": "demo5_banded_A_quasi.png",
-        },
-    ]
-
-    # ============================================================
-    # Run loop (ONE solve call site + ONE plot call site)
-    # ============================================================
-    any_ran = False
-    for spec in demos:
-        if not run_flags.get(spec["name"], False):
-            continue
-        any_ran = True
-
-        A, basis, solver_kwargs = spec["build"]()
-        # --- print header BEFORE solve so verbose output is contextual
-        print("\n" + "=" * 72)
-        print(f"[{spec['name']}] {spec['title']}")
-        print(f"A_type={spec.get('A_type', '?')}, S_type={spec.get('S_type', '?')}")
-        print(f"n={A.shape[0]}, m={getattr(basis, 'm', 'implicit/NA')}, solver={spec.get('solver_tag', '?')}")
-
-        # pass a prefix so iteration lines include the demo name
-        solver_kwargs = dict(solver_kwargs)
-        solver_kwargs["log_prefix"] = f"[{spec['name']}] "
-
-        sol, elapsed = time_solve(spec["solve"], A, basis, **solver_kwargs)
-
-        B, C = sol["B"], sol["C"]
-
-        # reconstruction diagnostic
-        recon = np.linalg.norm(A - (spd_inverse(B) + C), ord="fro")
-
-        # choose basis for trace check and plotting:
-        # - if primal: basis is the constraint basis
-        # - if dual with basis=None: basis_perp exists in sol and is usable for trace/plotting
-        basis_for_check = basis if basis is not None else sol.get("basis_perp", None)
-
-        if basis_for_check is not None and hasattr(basis_for_check, "trace_with"):
-            max_trace = float(np.max(np.abs(basis_for_check.trace_with(B))))
-        else:
-            max_trace = float("nan")
-
-        info = sol.get("info", {})
-        iters = info.get("iters", "?")
-        backtracks = info.get("backtracks", "?")
-
-        print("\n" + "=" * 72)
-        print(f"[{spec['name']}] {spec['title']}")
-        print(f"n={A.shape[0]}, m={getattr(basis, 'm', 'implicit/NA')}, solver={sol.get('solver','?')}")
-        print(f"time={elapsed:.4f}s, iters={iters}, backtracks={backtracks}, recon_fro={recon:.3e}, max|tr(BDk)|={max_trace:.3e}")
-
-        # plot (use basis_for_check so demo2 doesn't crash)
-        plot_path = os.path.join(outdir, spec["plot_file"])
-        plot_decomposition_heatmaps(
-            A, B, C, basis_for_check,
-            filename=plot_path,
-            add_title=True
-        )
-        print(f"saved plot -> {plot_path}")
-
-    if not any_ran:
-        print("Nothing selected. Use --all or --run demo1_primal_smallS,...")
-
-
