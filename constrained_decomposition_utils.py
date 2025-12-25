@@ -33,10 +33,19 @@ def plot_decomposition_heatmaps(A, B, C, basis, filename=None, add_title=False):
     # Compute gradient diagnostic g_k = Bkk - Bk,k+1
     n = B.shape[0]
 
-    g = basis.trace_with(B) #     g = np.array([B[k, k] - B[k, k+1] for k in range(n - 1)])
+    g = None
+    if basis is not None and hasattr(basis, "trace_with"):
+        try:
+            g = basis.trace_with(B)
+        except Exception:
+            g = None
 
-    sum_g = np.sum(g)
-    max_g = np.max(np.abs(g))
+    if g is not None:
+        sum_g = np.sum(g)
+        max_g = np.max(np.abs(g))
+    else:
+        sum_g = np.nan
+        max_g = np.nan
 
     # Compute phi = -log det(A - C)
     M = A - C
