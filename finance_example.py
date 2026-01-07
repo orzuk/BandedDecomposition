@@ -144,7 +144,7 @@ def make_mixed_fbm_markovian_basis(N: int):
     return SymBasis(n=n, dense_mats=mats, name=f"mixed_fbm_markovian_N={N}")
 
 
-def compute_value_vs_H_mixed_fbm(H_vec, N=50, alpha=1.0, delta_t=1.0, solver="primal", strategy="both"):
+def compute_value_vs_H_mixed_fbm(H_vec, N=50, alpha=1.0, delta_t=1.0, solver="primal", method="newton", strategy="both"):
     """
     Compute investment value vs Hurst parameter H for mixed fBM model.
 
@@ -245,17 +245,20 @@ def compute_value_vs_H_mixed_fbm(H_vec, N=50, alpha=1.0, delta_t=1.0, solver="pr
 
         _, log_det_Sigma = np.linalg.slogdet(Sigma)
 
-        # --- Markovian strategy (always primal Newton, m is small) ---
+        # --- Markovian strategy (primal, m is small) ---
         if run_markovian:
             try:
-                B_markov, C_markov, _ = constrained_decomposition(
+                B_markov, C_markov, _, info_m = constrained_decomposition(
                     A=Lambda,
                     basis=basis_markov,
-                    method="newton",
+                    method=method,
                     tol=1e-8,
                     max_iter=500,
-                    verbose=False
+                    verbose=False,
+                    return_info=True,
                 )
+                if i == 0:
+                    print(f"  [Markovian using: {info_m.get('used_method', 'unknown')}]")
                 _, log_det_B_markov = np.linalg.slogdet(B_markov)
                 val_markovian[i] = 0.5 * (log_det_Sigma - log_det_B_markov)
                 print(f"  Markovian: log(value) = {val_markovian[i]:.6f}")
@@ -277,16 +280,18 @@ def compute_value_vs_H_mixed_fbm(H_vec, N=50, alpha=1.0, delta_t=1.0, solver="pr
                         verbose=False
                     )
                 else:
-                    # Primal Newton with raised Hessian limit
-                    B_full, C_full, _ = constrained_decomposition(
+                    # Primal with specified method (auto-switches to newton-cg for large m)
+                    B_full, C_full, _, info = constrained_decomposition(
                         A=Lambda,
                         basis=basis_full,
-                        method="newton",
+                        method=method,
                         tol=1e-8,
                         max_iter=500,
                         verbose=False,
-                        max_m_for_full_hessian=3000  # allow up to 3000 for N=50
+                        return_info=True,
                     )
+                    if i == 0:  # Print method used on first H
+                        print(f"  [Full-info using: {info.get('used_method', 'unknown')}]")
 
                 _, log_det_B_full = np.linalg.slogdet(B_full)
                 val_full_info[i] = 0.5 * (log_det_Sigma - log_det_B_full)
@@ -309,7 +314,10 @@ if __name__ == "__main__":
     parser.add_argument("--n", type=int, default=100,
                         help="Matrix dimension (default: 100). For mixed_fbm, N=n//2 time steps.")
     parser.add_argument("--solver", type=str, choices=["primal", "dual"], default="primal",
-                        help="Solver for full-info: 'primal' (Newton with raised limit) or 'dual' (Newton on S⊥)")
+                        help="Solver for full-info: 'primal' or 'dual' (Newton on S⊥)")
+    parser.add_argument("--method", type=str, choices=["newton", "newton-cg", "quasi-newton"], default="newton",
+                        help="Optimization method: 'newton' (auto-switches to newton-cg for large m), "
+                             "'newton-cg' (matrix-free), or 'quasi-newton' (BFGS)")
     parser.add_argument("--strategy", type=str, choices=["both", "markovian", "full"], default="both",
                         help="Which strategies to run: 'both', 'markovian' (fast, O(N)), or 'full' (slow, O(N²))")
     args = parser.parse_args()
@@ -317,9 +325,10 @@ if __name__ == "__main__":
     model_type = args.model
     n = args.n
     solver = args.solver
+    method = args.method
     strategy = args.strategy
     print(f"\n{'='*60}")
-    print(f"Running model: {model_type}, n={n}, solver={solver}, strategy={strategy}")
+    print(f"Running model: {model_type}, n={n}, solver={solver}, method={method}, strategy={strategy}")
     print(f"{'='*60}\n")
 
     # --- Experiment settings ---
@@ -337,7 +346,7 @@ if __name__ == "__main__":
         val_markov, val_general = compute_value_vs_H_fbm(H_vec, n=n)
     else:  # mixed_fbm
         val_markov, val_general = compute_value_vs_H_mixed_fbm(
-            H_vec, N=N, alpha=alpha, delta_t=delta_t, solver=solver, strategy=strategy
+            H_vec, N=N, alpha=alpha, delta_t=delta_t, solver=solver, method=method, strategy=strategy
         )
 
     # --- Plot ---

@@ -95,32 +95,21 @@ def spd_inverse(A):
     return 0.5 * (A_inv + A_inv.T)
 
 
-
-
-
 def _logdet_spd_from_cholesky(L):
     return 2.0 * np.sum(np.log(np.diag(L)))
+
 
 class SymBasis:
     """
     Represents a symmetric matrix subspace S = span(D1,...,Dm).
 
-    Goals:
-      1) Be general (any symmetric basis matrices).
-      2) Stay efficient when the basis is structured/sparse.
+    Supports:
+      - dense basis matrices (list of dense Dk)
+      - sparse basis matrices in COO format: (rows, cols, vals) per Dk (0-based)
 
-    You can provide the basis in one of three ways:
-
-    (A) dense_mats: list of (n,n) dense numpy arrays.
-    (B) coo_mats: list where each element is a tuple (rows, cols, vals, n),
-        describing a sparse matrix in COO format. (rows, cols, vals are 1D arrays).
-        NOTE: you may include both (i,j) and (j,i) entries if you like; we do not
-        automatically symmetrize sparse inputs for speed.
-    (C) custom builder / tracers:
-        - build_C(x): override to build C(x) quickly without iterating full basis
-        - trace_with(B): override to compute g_k = tr(B Dk) quickly.
-
-    If you pass dense_mats or coo_mats, default implementations are used.
+    Stage-1/implicit-B helpers:
+      - cached index sets needed for trace computations
+      - fast linear combination D(v) in COO (for Hv)
     """
 
     def __init__(self, n, dense_mats=None, coo_mats=None, name="generic"):
@@ -128,8 +117,7 @@ class SymBasis:
         self.name = name
 
         if dense_mats is None and coo_mats is None:
-            raise ValueError("Provide either dense_mats or coo_mats (or subclass SymBasis).")
-
+            raise ValueError("Provide either dense_mats or coo_mats.")
         if dense_mats is not None and coo_mats is not None:
             raise ValueError("Provide only one of dense_mats or coo_mats.")
 
@@ -146,7 +134,6 @@ class SymBasis:
             self._dense = mats
 
         if coo_mats is not None:
-            # Each Dk described by (rows, cols, vals) with 0-based indices.
             parsed = []
             for item in coo_mats:
                 rows, cols, vals = item
@@ -162,40 +149,37 @@ class SymBasis:
 
         self.m = len(self._dense) if self._dense is not None else len(self._coo)
 
+        # caches for COO
+        self._cached_cols = None     # columns needed for gradient traces
+        self._cached_I = None        # indices (rows∪cols) needed for Hv traces
+        self._cached_col_pos = None  # map: col -> position in cached_cols
+        self._cached_I_pos = None    # map: idx -> position in cached_I
+
+    def is_sparse_coo(self) -> bool:
+        return self._coo is not None
+
     # -----------------------------
     # Default linear map C(x)
     # -----------------------------
     def build_C(self, x):
-        """
-        Build C(x) = sum_k x_k Dk as a dense (n,n) array.
-        Override if you can do better in your structured case.
-        """
         x = np.asarray(x, dtype=float)
         if x.shape != (self.m,):
             raise ValueError(f"x must have shape ({self.m},)")
         C = np.zeros((self.n, self.n), dtype=float)
 
         if self._dense is not None:
-            # Dense accumulation
             for k, Dk in enumerate(self._dense):
                 C += x[k] * Dk
             return C
 
-        # Sparse COO accumulation
         for k, (rows, cols, vals) in enumerate(self._coo):
             C[rows, cols] += x[k] * vals
         return C
 
     # -----------------------------
-    # Default tracer g_k = tr(B Dk)
+    # Dense B tracer
     # -----------------------------
     def trace_with(self, B):
-        """
-        Compute g_k = tr(B Dk) for k=1..m.
-        For SPD B and symmetric Dk, this is also <B, Dk>_F.
-
-        Override if you have a fast formula.
-        """
         B = np.asarray(B, dtype=float)
         if B.shape != (self.n, self.n):
             raise ValueError("B has wrong shape.")
@@ -206,60 +190,306 @@ class SymBasis:
                 g[k] = float(np.sum(B * Dk))
             return g
 
-        # sparse COO: trace = sum_{i,j} B_ij Dk_ij
         for k, (rows, cols, vals) in enumerate(self._coo):
             g[k] = float(np.sum(B[rows, cols] * vals))
         return g
 
     # -----------------------------
-    # Optional specialized Hessian
+    # Hessian computation
     # -----------------------------
     def hessian_from_B(self, B):
         """
-        If you can compute the Hessian H_{k,l} = tr(B Dk B Dl) faster
-        than generic O(m^2 n^2), override this method.
-
-        By default, returns None which triggers the generic path.
+        Optional: override in subclass to compute H_{k,l} = tr(B Dk B Dl) faster.
+        Returns None by default (caller should use generic_hessian_from_B).
         """
         return None
 
-    # -----------------------------
-    # Generic Hessian builder (fallback)
-    # -----------------------------
     def generic_hessian_from_B(self, B, max_m_for_full=1000):
         """
         Generic Hessian H_{k,l} = tr(B Dk B Dl).
-
-        This forms the full m x m Hessian and is intended for small/moderate m.
         """
         m = self.m
         n = self.n
         if m > max_m_for_full:
             raise ValueError(
                 f"m={m} is large; forming the full Hessian is expensive. "
-                f"Either use quasi-newton, reduce m, or implement hessian_from_B."
+                f"Use newton-cg or quasi-newton instead."
             )
 
         B = np.asarray(B, dtype=float)
 
-        # Build BDk = B @ Dk efficiently.
-        # Dense basis: standard multiplication.
         if self._dense is not None:
             BD = np.stack([B @ Dk for Dk in self._dense], axis=0)  # (m,n,n)
         else:
-            # Sparse COO: BDk[:, j] += sum_{(i,j)} val * B[:, i]
             BD = np.zeros((m, n, n), dtype=float)
             for k, (rows, cols, vals) in enumerate(self._coo):
-                # group by column for cache friendliness
-                # Simple loop is fine when sk is small.
                 for i, j, v in zip(rows, cols, vals):
                     BD[k, :, j] += v * B[:, i]
 
-        # H_{k,l} = tr(BDk @ BDl) = sum_{i,j} BDk_{i,j} * BDl_{j,i}
         H = np.einsum("kij,lji->kl", BD, BD, optimize=True)
-        # Symmetrize for numerical stability
         H = 0.5 * (H + H.T)
         return H
+
+    # -----------------------------
+    # COO caches
+    # -----------------------------
+    def required_columns_for_traces(self, rebuild_cache=False):
+        """
+        For gradient g_k = sum_{(i,j) in supp(Dk)} Dk_ij * B_ij,
+        we need B_ij entries, so we need the columns j that appear in any Dk.
+        """
+        if self._coo is None:
+            return None
+        if self._cached_cols is not None and not rebuild_cache:
+            return self._cached_cols
+
+        cols = np.unique(np.concatenate([cols for (rows, cols, vals) in self._coo])).astype(int)
+        self._cached_cols = cols
+        self._cached_col_pos = {int(c): t for t, c in enumerate(cols)}
+        return cols
+
+    def required_indices_rows_cols(self, rebuild_cache=False):
+        """
+        For Hv in the COO implicit method we will build a small r×r matrix
+        G = Z^T D(v) Z where Z contains columns of B indexed by I = union(rows, cols).
+        """
+        if self._coo is None:
+            return None
+        if self._cached_I is not None and not rebuild_cache:
+            return self._cached_I
+
+        all_rows = np.concatenate([rows for (rows, cols, vals) in self._coo])
+        all_cols = np.concatenate([cols for (rows, cols, vals) in self._coo])
+        I = np.unique(np.concatenate([all_rows, all_cols])).astype(int)
+        self._cached_I = I
+        self._cached_I_pos = {int(i): t for t, i in enumerate(I)}
+        return I
+
+    # -----------------------------
+    # COO trace from selected columns
+    # -----------------------------
+    def trace_from_selected_cols(self, Z, col_pos=None):
+        """
+        Compute g_k = tr(B Dk) from Z = B[:, J] where J = required_columns_for_traces().
+        """
+        if self._coo is None:
+            raise ValueError("trace_from_selected_cols requires COO basis.")
+        if col_pos is None:
+            if self._cached_col_pos is None:
+                self.required_columns_for_traces(rebuild_cache=True)
+            col_pos = self._cached_col_pos
+
+        g = np.zeros(self.m, dtype=float)
+        for k, (rows, cols, vals) in enumerate(self._coo):
+            acc = 0.0
+            for i, j, v in zip(rows, cols, vals):
+                acc += v * Z[i, col_pos[int(j)]]
+            g[k] = float(acc)
+        return g
+
+    def trace_from_small_G(self, G, I_pos=None):
+        """
+        Compute h_k = sum_{(i,j)} Dk_ij * W_ij where W restricted to I×I is represented by G.
+        Here G[p,q] = W[I[p], I[q]].
+        """
+        if self._coo is None:
+            raise ValueError("trace_from_small_G requires COO basis.")
+        if I_pos is None:
+            if self._cached_I_pos is None:
+                self.required_indices_rows_cols(rebuild_cache=True)
+            I_pos = self._cached_I_pos
+
+        h = np.zeros(self.m, dtype=float)
+        for k, (rows, cols, vals) in enumerate(self._coo):
+            acc = 0.0
+            for i, j, v in zip(rows, cols, vals):
+                acc += v * G[I_pos[int(i)], I_pos[int(j)]]
+            h[k] = float(acc)
+        return h
+
+    # -----------------------------
+    # COO linear combination D(v)
+    # -----------------------------
+    def coo_linear_combo(self, v, drop_tol=0.0):
+        """
+        Build COO for D(v)=sum_l v_l D_l.
+
+        Returns (rows, cols, vals) with duplicates summed.
+        This is used inside Hv in Newton–CG.
+
+        For large m, this is still much cheaper than dense D(v) if basis is sparse.
+        """
+        if self._coo is None:
+            raise ValueError("coo_linear_combo requires COO basis.")
+        v = np.asarray(v, dtype=float).ravel()
+        if v.size != self.m:
+            raise ValueError("v has wrong length.")
+
+        # accumulate into dictionary
+        acc = {}
+        for l, (rows, cols, vals) in enumerate(self._coo):
+            a = float(v[l])
+            if a == 0.0:
+                continue
+            for i, j, val in zip(rows, cols, vals):
+                key = (int(i), int(j))
+                acc[key] = acc.get(key, 0.0) + a * float(val)
+
+        if not acc:
+            return np.array([], dtype=int), np.array([], dtype=int), np.array([], dtype=float)
+
+        rows = []
+        cols = []
+        vals = []
+        for (i, j), val in acc.items():
+            if drop_tol and abs(val) <= drop_tol:
+                continue
+            rows.append(i); cols.append(j); vals.append(val)
+
+        return np.array(rows, dtype=int), np.array(cols, dtype=int), np.array(vals, dtype=float)
+
+
+def solve_chol_multi_rhs(L, RHS):
+    """
+    Solve (L L^T) X = RHS for X, given Cholesky factor L.
+    RHS can be (n,) or (n,r).
+    """
+    Y = np.linalg.solve(L, RHS)
+    X = np.linalg.solve(L.T, Y)
+    return X
+
+
+def cg_solve_simple(matvec, b, tol=1e-6, max_iter=200):
+    """
+    Basic CG for SPD system A x = b, given matvec(x)=A@x.
+    Stops when ||r|| <= tol*||b||. (Simpler version without preconditioner.)
+    """
+    b = np.asarray(b, dtype=float).ravel()
+    m = b.size
+    x = np.zeros(m, dtype=float)
+
+    r = b - matvec(x)
+    p = r.copy()
+    rr = float(r @ r)
+    b_norm = float(np.linalg.norm(b))
+    if b_norm == 0.0:
+        return x, {"iters": 0, "converged": True, "rel_res": 0.0}
+
+    thresh = (tol * b_norm) ** 2
+
+    for it in range(1, max_iter + 1):
+        Ap = matvec(p)
+        denom = float(p @ Ap)
+        if denom <= 0:
+            break
+        alpha = rr / denom
+        x += alpha * p
+        r -= alpha * Ap
+        rr_new = float(r @ r)
+        if rr_new <= thresh:
+            return x, {"iters": it, "converged": True, "rel_res": float(np.sqrt(rr_new) / b_norm)}
+        beta = rr_new / rr
+        p = r + beta * p
+        rr = rr_new
+
+    return x, {"iters": it, "converged": False, "rel_res": float(np.sqrt(rr) / b_norm)}
+
+
+def phi_grad_spd_implicit_selected(A, x, basis: SymBasis):
+    """
+    Compute phi and gradient g WITHOUT forming B.
+
+    For COO basis:
+      - factorize M = A - C(x) via Cholesky
+      - compute only needed columns of B = M^{-1}:
+          Z = B[:, J] where J is union of columns appearing in any Dk
+      - compute g from Z using sparse trace accumulation
+
+    For dense basis:
+      - falls back to explicit B (no win possible without structure)
+    """
+    A = np.asarray(A, dtype=float)
+    C = basis.build_C(x)
+    M = A - C
+    L = np.linalg.cholesky(M)
+    phi = -_logdet_spd_from_cholesky(L)
+
+    if not basis.is_sparse_coo():
+        # dense fallback (no generic way to avoid B if you need all traces)
+        n = A.shape[0]
+        I = np.eye(n)
+        B = solve_chol_multi_rhs(L, I)
+        B = 0.5 * (B + B.T)
+        g = basis.trace_with(B)
+        return phi, g, L, C, M
+
+    n = A.shape[0]
+    J = basis.required_columns_for_traces()
+    if J.size == 0:
+        g = np.zeros(basis.m, dtype=float)
+        return phi, g, L, C, M
+
+    E = np.eye(n)[:, J]           # n×|J|
+    Z = solve_chol_multi_rhs(L, E) # Z = B[:,J]
+    g = basis.trace_from_selected_cols(Z)
+    return phi, g, L, C, M
+
+
+def hessvec_spd_coo_implicit_factory(L, basis: SymBasis, drop_tol=0.0):
+    """
+    Build a closure Hv(v) that computes (H v) for the logdet objective,
+    WITHOUT forming B and WITHOUT forming the full Hessian.
+
+    COO-only version. Uses:
+      I = union of all rows/cols that appear in any Dk
+      Z = B[:, I] via multi-RHS solves (once per outer iteration)
+      For each v:
+         Dv = sum v_l D_l in COO
+         Y = Dv @ Z  (sparse-dense)
+         G = Z^T @ Y = Z^T Dv Z   (small r×r)
+         Hv = basis.trace_from_small_G(G)
+    """
+    if not basis.is_sparse_coo():
+        raise ValueError("Implicit COO Hessvec requires COO basis.")
+
+    n = basis.n
+    I = basis.required_indices_rows_cols()
+    r = int(I.size)
+    if r == 0:
+        def Hv(v):
+            return np.zeros(basis.m, dtype=float)
+        return Hv
+
+    E = np.eye(n)[:, I]           # n×r
+    Z = solve_chol_multi_rhs(L, E) # Z = B[:,I], dense n×r
+
+    # Precompute mapping for trace extraction
+    I_pos = basis._cached_I_pos
+    if I_pos is None:
+        basis.required_indices_rows_cols(rebuild_cache=True)
+        I_pos = basis._cached_I_pos
+
+    def Hv(v):
+        v = np.asarray(v, dtype=float).ravel()
+        # build COO for D(v)
+        rows, cols, vals = basis.coo_linear_combo(v, drop_tol=drop_tol)
+        if rows.size == 0:
+            return np.zeros(basis.m, dtype=float)
+
+        # Y = Dv @ Z (n×r) computed by COO accumulation
+        Y = np.zeros((n, r), dtype=float)
+        for i, j, a in zip(rows, cols, vals):
+            Y[int(i), :] += float(a) * Z[int(j), :]
+
+        # G = Z^T @ Y (r×r)
+        G = Z.T @ Y
+
+        # Hv_k = sum_{(i,j) in Dk} Dk_ij * (B D(v) B)_{ij}
+        # and (B D(v) B) restricted to I×I equals G
+        return basis.trace_from_small_G(G, I_pos=I_pos)
+
+    return Hv
+
 
 def is_circulant(A, tol=1e-10):
     """
@@ -552,6 +782,7 @@ def phi_grad_hess_spd(A, x, basis: SymBasis, order=1):
 
     return phi, g, H, B, C, M, L
 
+
 def phi_only_spd(A, x, basis: SymBasis):
     """
     Compute phi(x) = -log det(A - C(x)) with SPD feasibility check,
@@ -563,6 +794,89 @@ def phi_only_spd(A, x, basis: SymBasis):
     L = np.linalg.cholesky(M)               # raises LinAlgError if infeasible
     phi = -_logdet_spd_from_cholesky(L)
     return phi
+
+
+
+def cg_solve(matvec, b, x0=None, tol=1e-6, max_iter=200, M_inv=None):
+    """
+    Conjugate Gradient for SPD linear system A x = b, given only matvec(x)=A@x.
+
+    Args:
+      matvec: callable(v)->A v
+      b: (m,) RHS
+      x0: initial guess
+      tol: relative tolerance on residual norm ||r|| <= tol*||b||
+      max_iter: max CG iterations
+      M_inv: optional preconditioner callable(z)->approx A^{-1} z
+
+    Returns:
+      x, info dict with keys: iters, converged, rel_res, abs_res
+    """
+    b = np.asarray(b, dtype=float).ravel()
+    m = b.size
+    if x0 is None:
+        x = np.zeros(m, dtype=float)
+    else:
+        x = np.asarray(x0, dtype=float).ravel().copy()
+
+    r = b - matvec(x)
+    z = M_inv(r) if M_inv is not None else r.copy()
+    p = z.copy()
+    rz_old = float(r @ z)
+
+    b_norm = float(np.linalg.norm(b))
+    if b_norm == 0.0:
+        return x, {"iters": 0, "converged": True, "rel_res": 0.0, "abs_res": 0.0}
+
+    abs_tol = tol * b_norm
+
+    for it in range(1, max_iter + 1):
+        Ap = matvec(p)
+        denom = float(p @ Ap)
+        if denom <= 0:
+            # Should not happen for SPD, but damping/roundoff can cause this.
+            break
+
+        alpha = rz_old / denom
+        x += alpha * p
+        r -= alpha * Ap
+
+        abs_res = float(np.linalg.norm(r))
+        if abs_res <= abs_tol:
+            return x, {"iters": it, "converged": True, "rel_res": abs_res / b_norm, "abs_res": abs_res}
+
+        z = M_inv(r) if M_inv is not None else r
+        rz_new = float(r @ z)
+        beta = rz_new / rz_old
+        p = z + beta * p
+        rz_old = rz_new
+
+    abs_res = float(np.linalg.norm(r))
+    return x, {"iters": it, "converged": False, "rel_res": abs_res / b_norm, "abs_res": abs_res}
+
+
+def hessvec_spd_from_B(v, B, basis: SymBasis):
+    """
+    Compute Hessian-vector product (Hv) for Phi(x)=-logdet(A-C(x)),
+    using an explicit B = (A-C(x))^{-1}, but WITHOUT forming H.
+
+    Identity:
+      (Hv)_k = tr(B D_k B D(v)) = tr(D_k * (B D(v) B))
+    where D(v) = sum_l v_l D_l.
+
+    Implementation:
+      Dv = basis.build_C(v)  (same linear combination)
+      S  = B @ Dv @ B
+      Hv = basis.trace_with(S)  # returns [ tr(S D_k) ]_k = [ tr(D_k S) ]_k
+
+    Works for any basis that implements build_C and trace_with.
+    """
+    v = np.asarray(v, dtype=float).ravel()
+    Dv = basis.build_C(v)          # dense matrix
+    S = B @ Dv @ B                 # dense matrix
+    Hv = basis.trace_with(S)       # length m
+    return Hv
+
 
 def constrained_decomposition(
     A,
@@ -578,27 +892,34 @@ def constrained_decomposition(
     max_backtracks=60,
     max_m_for_full_hessian=500,
     log_prefix="",
-    return_info=False
+    return_info=False,
+
+    # Newton–CG controls
+    cg_tol=1e-6,
+    cg_max_iter=200,
+    auto_newton_cg=True,
+
+    # implicit Hv tuning
+    hv_drop_tol=0.0,
 ):
     """
-    Solve the convex problem:
-        minimize Phi(x) = -log det(A - C(x))
-        subject to A - C(x) ≻ 0
-    where C(x) in span(D1,...,Dm) is represented by `basis`.
+    Methods:
+      - "gradient-descent"
+      - "quasi-newton"
+      - "newton"      (explicit Hessian; only practical for small m)
+      - "newton-cg"   (matrix-free Newton with CG using implicit-B Hv)
 
-    Returns (B, C, x) with:
-        C = C(x) in S,
-        B = (A - C)^{-1} in S_{++},
-        and (approximately) tr(B Dk) = 0 for all k.
+    Auto-switch:
+      If method=="newton" and m > max_m_for_full_hessian and auto_newton_cg=True,
+      switch to "newton-cg".
 
-    Efficiency notes:
-      - For structured/sparse basis, implement basis.build_C and basis.trace_with.
-      - For Newton, implement basis.hessian_from_B for your special cases
-        (e.g., TridiagC_Basis already does this).
-      - Otherwise, Newton will form a full Hessian which is only practical when m is small.
-        If m is large, prefer method="quasi-newton".
+    Implicit-B Newton–CG:
+      For COO bases, Hv(v) is computed without forming B and without forming H.
+      Uses only:
+        - Cholesky of M
+        - multi-RHS solves for selected columns of B
+        - sparse COO algebra
     """
-    # Prefix for all verbose logging produced by this solver (e.g. per-demo tags).
     pfx = log_prefix or ""
     A = np.asarray(A, dtype=float)
     n = A.shape[0]
@@ -614,64 +935,65 @@ def constrained_decomposition(
         C = np.zeros_like(A)
         B = spd_inverse(A)
         x = np.zeros((0,), dtype=float)
+        if return_info:
+            return B, C, x, {"iters": 0, "backtracks": 0, "converged": True, "final_max_abs_trace": 0.0, "used_method": method}
         return B, C, x
 
-    if method not in ("gradient-descent", "quasi-newton", "newton"):
-        raise ValueError("method must be one of {'gradient-descent','quasi-newton','newton'}.")
+    if method not in ("gradient-descent", "quasi-newton", "newton", "newton-cg"):
+        raise ValueError("method must be one of {'gradient-descent','quasi-newton','newton','newton-cg'}.")
+
+    used_method = method
+    if method == "newton" and auto_newton_cg and (m > max_m_for_full_hessian):
+        used_method = "newton-cg"
+        # Always print auto-switch message (important for user awareness)
+        print(f"{pfx}[Auto-switch] m={m} > {max_m_for_full_hessian} -> using newton-cg (matrix-free)")
 
     x = np.zeros(m, dtype=float)
-    phi, g, H, B, C, M, L = phi_grad_hess_spd(A, x, basis, order=(2 if method == "newton" else 1))
 
-#    min_diag_L = float(np.min(np.diag(L)))
-    if isinstance(L, np.ndarray) and L.ndim == 2:
-        min_diag_L = float(np.min(np.diag(L)))
+    # Initial evaluation (phi + g) without explicit B when possible
+    if used_method in ("gradient-descent", "quasi-newton", "newton-cg"):
+        phi, g, L, C, M = phi_grad_spd_implicit_selected(A, x, basis)
+        H = None
+        g_prev = g.copy()  # for BFGS
     else:
-        # circulant/FFT path (no Cholesky)
-        min_diag_L = np.nan  # or 1.0, or just skip this diagnostic
+        phi, g, H, B, C, M, L = phi_grad_hess_spd(A, x, basis, order=2)
+        g_prev = None
 
-    if verbose:
-        print(f"{pfx}...  min(diag(L))={min_diag_L:.3e}")
+    if verbose and isinstance(L, np.ndarray) and L.ndim == 2:
+        print(f"{pfx}...  min(diag(L))={float(np.min(np.diag(L))):.3e}")
 
-    if method == "quasi-newton":
+    if used_method == "quasi-newton":
         H_BFGS = np.eye(m)
 
     total_backtracks = 0
     iters_done = 0
 
-    start_iter_time = time.perf_counter() # just for first iter
+    start_iter_time = time.perf_counter()
     for it in range(max_iter):
         iters_done = it + 1
         g_norm = float(np.linalg.norm(g))
         max_abs_g = float(np.max(np.abs(g)))
+
         if verbose:
-#            lam_min = float(np.min(np.linalg.eigvalsh(M)))
-            iter_time = time.perf_counter() - start_iter_time
-            print(f"{pfx}iter {it:4d}  phi={phi: .6e}  ||g||={g_norm: .3e}  max|g|={max_abs_g: .3e} time={iter_time: .3e}") #  lam_min(A-C)={lam_min: .3e}")
+            dt = time.perf_counter() - start_iter_time
+            print(f"{pfx}iter {it:4d}  phi={phi: .6e}  ||g||={g_norm: .3e}  max|g|={max_abs_g: .3e} time={dt: .3e}")
             start_iter_time = time.perf_counter()
 
         if max_abs_g < tol:
-            if verbose:
-                print(f"{pfx}Converged: max|tr(B Dk)|={max_abs_g:.3e} < tol={tol}")
             break
 
-        # Search direction
-        if method == "gradient-descent":
+        # -------------------------
+        # direction
+        # -------------------------
+        if used_method == "gradient-descent":
             d = -g
 
-        elif method == "quasi-newton":
+        elif used_method == "quasi-newton":
             d = -(H_BFGS @ g)
 
-        else:  # newton
-            # Hessian may be large to form; allow user control
+        elif used_method == "newton":
             if H is None:
-                print(f"{pfx}None H !!! Aborting !!!")
-                return None
-#                H = basis.hessian_from_B(B)
-#                if H is None:
-#                    H = basis.generic_hessian_from_B(B, max_m_for_full=max_m_for_full_hessian)
-
-            # Damped Newton: (H + λI) d = -g
-            # Increase damping until Cholesky succeeds.
+                raise ValueError("Newton requested but Hessian is None.")
             lam = newton_damping
             for _ in range(10):
                 try:
@@ -683,86 +1005,104 @@ def constrained_decomposition(
                 except np.linalg.LinAlgError:
                     lam = max(10.0 * lam, 1e-12)
             else:
-                # fallback
-                if verbose:
-                    print(f"{pfx}  Newton Hessian not SPD even after damping; fallback to -g.")
                 d = -g
 
-        # Ensure descent direction
+        else:
+            # -------------------------
+            # newton-cg with implicit-B Hv
+            # -------------------------
+            lam = max(newton_damping, 0.0)
+
+            if basis.is_sparse_coo():
+                Hv = hessvec_spd_coo_implicit_factory(L, basis, drop_tol=hv_drop_tol)
+            else:
+                # dense basis fallback: Hv requires explicit B (no generic win)
+                Ieye = np.eye(n)
+                B = solve_chol_multi_rhs(L, Ieye)
+                B = 0.5 * (B + B.T)
+                def Hv(v):
+                    # Hv = tr(Dk * (B D(v) B)) = trace_with(B D(v) B)
+                    Dv = basis.build_C(v)
+                    S = B @ Dv @ B
+                    return basis.trace_with(S)
+
+            def mv(v):
+                return Hv(v) + lam * np.asarray(v, dtype=float)
+
+            d, cg_info = cg_solve(mv, -g, tol=cg_tol, max_iter=min(cg_max_iter, max(10, m)))
+
+            if verbose:
+                print(f"{pfx}  [CG] iters={cg_info['iters']} converged={cg_info['converged']} rel_res={cg_info['rel_res']:.2e}")
+
+            if (not cg_info["converged"]) and (cg_info["rel_res"] > 1e-2):
+                d = -g
+
+        # Ensure descent
         gTd = float(g @ d)
         if gTd >= 0:
-            if verbose:
-                print(f"{pfx}  Non-descent direction; using -g.")
             d = -g
             gTd = float(g @ d)
 
-        # Backtracking line search
+        # -------------------------
+        # backtracking
+        # -------------------------
         t = float(initial_step)
         accepted = False
-        for bt in range(max_backtracks):
+        for _ in range(max_backtracks):
             total_backtracks += 1
             x_try = x + t * d
             try:
-                # FAST trial: only check feasibility + phi
                 phi_try = phi_only_spd(A, x_try, basis)
             except np.linalg.LinAlgError:
-                # infeasible (A - C not SPD)
                 t *= backtracking_factor
                 continue
-
-            # Armijo condition: phi(x+td) <= phi(x) + alpha t g^T d
             if phi_try <= phi + armijo_alpha * t * gTd:
                 accepted = True
                 break
-
             t *= backtracking_factor
 
-
         if not accepted:
-            if verbose:
-                print(f"{pfx}Backtracking failed; stopping.")
             break
 
-        # We accepted x_try based on phi-only test.
-        # Now compute full quantities ONCE at the accepted point.
-        phi_try, g_try, H_try, B_try, C_try, M_try, L_try = phi_grad_hess_spd(
-            A, x_try, basis, order=(2 if method == "newton" else 1)
-        )
+        # -------------------------
+        # accept + reevaluate (implicit)
+        # -------------------------
+        x_prev = x
+        x = x_try
+        phi, g, L, C, M = phi_grad_spd_implicit_selected(A, x, basis)
 
         # BFGS update
-        if method == "quasi-newton":
-            s = x_try - x
-            y_vec = g_try - g
+        if used_method == "quasi-newton":
+            s = x - x_prev
+            y_vec = g - g_prev
             sy = float(s @ y_vec)
             if sy > 1e-12:
                 rho = 1.0 / sy
-                I = np.eye(m)
-                V = I - rho * np.outer(s, y_vec)
+                I_m = np.eye(m)
+                V = I_m - rho * np.outer(s, y_vec)
                 H_BFGS = V @ H_BFGS @ V.T + rho * np.outer(s, s)
+            g_prev = g.copy()
 
-        # Accept
-        x, phi, g, B, C, M = x_try, phi_try, g_try, B_try, C_try, M_try
-        if method == "newton":
-            H = H_try
+    # finalize: return explicit B,C like before (compute B once at end)
+    # (This is unavoidable if you insist on returning B explicitly.)
+    Ieye = np.eye(n)
+    B = solve_chol_multi_rhs(L, Ieye)
+    B = 0.5 * (B + B.T)
 
-    # compute a final constraint violation number (max |tr(B Dk)|)
-    # works for any basis that implements trace_with
-    if hasattr(basis, "trace_with"):
-        _g_final = basis.trace_with(B)
-        max_trace = float(np.max(np.abs(_g_final))) if _g_final.size else 0.0
-    else:
-        max_trace = float("nan")
+    final_g = basis.trace_with(B)
+    max_trace = float(np.max(np.abs(final_g))) if final_g.size else 0.0
 
     info = {
         "iters": iters_done,
         "backtracks": total_backtracks,
-        "converged": (max_trace < tol) if np.isfinite(max_trace) else False,
+        "converged": (max_trace < tol),
         "final_max_abs_trace": max_trace,
+        "used_method": used_method,
     }
-
     if return_info:
         return B, C, x, info
     return B, C, x
+
 
 def make_coo_basis_from_sparse_patterns(n, patterns):
     """
@@ -828,7 +1168,7 @@ def _orthonormalize_dense_sym_basis(mats, atol=1e-12):
     return [_sym_unvec(Q[:, i], n) for i in range(Q.shape[1])]
 
 def _phi_grad_hess_dual(A, y, basis_perp: SymBasis, order=1):
-    """
+    r"""
     Dual objective over y:
         B(y) = sum_i y_i E_i   (E_i span S^\perp)
         psi(y) = -log det(B(y)) + tr(A B(y))
@@ -874,7 +1214,7 @@ def _psi_only_dual(A, y, basis_perp: SymBasis):
     return psi
 
 def _find_feasible_dual_start(A, basis_perp: SymBasis, tries=30, jitter=1e-6, rng=None):
-    """
+    r"""
     Heuristic to find y0 such that B(y0) is SPD.
     Prefers something 'close' to I and/or A^{-1}, projected to S^\perp.
     """
@@ -934,7 +1274,7 @@ def _find_feasible_dual_start(A, basis_perp: SymBasis, tries=30, jitter=1e-6, rn
     raise RuntimeError("Could not find feasible starting point for dual (B(y) SPD).")
 
 def make_orthogonal_complement_basis(basis: SymBasis, atol=1e-12, name=None):
-    """
+    r"""
     Construct a dense SymBasis spanning S^\perp where S = span(D1,...,Dm)
     is given by `basis`. Works best for moderate n.
 
@@ -1024,12 +1364,12 @@ def constrained_decomposition_dual(
     log_prefix="",
     return_info=False
 ):
-    """
+    r"""
     Dual Newton solver (mirrors constrained_decomposition for the primal).
 
     Solves:
         minimize_B  -log det(B) + tr(A B)
-        s.t.         B ≻ 0,   tr(B Dk)=0  (i.e., B ∈ S^\perp)
+        s.t.         B > 0,   tr(B Dk)=0  (i.e., B in S^\perp)
 
     Inputs:
       - A: SPD matrix
@@ -1040,8 +1380,8 @@ def constrained_decomposition_dual(
 
     Output:
       (B, C, y, basis_perp) where:
-        B ≻ 0 and B ⟂ S,
-        C ∈ S and A ≈ B^{-1} + C
+        B > 0 and B perpendicular to S,
+        C in S and A = B^{-1} + C
         y are the coordinates of B in basis_perp.
     """
     # Prefix for all verbose logging produced by this solver (e.g. per-demo tags).
