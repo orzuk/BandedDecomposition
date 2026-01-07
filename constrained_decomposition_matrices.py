@@ -11,8 +11,7 @@ It should not contain solvers or plotting.
 
 
 import numpy as np
-
-from constrained_decomposition_core import SymBasis
+from constrained_decomposition_core import SymBasis, block_reynolds_project
 
 
 
@@ -143,20 +142,6 @@ def make_banded_basis(n: int, b: int, include_diag: bool = True):
             mats.append(D)
     return SymBasis(n, dense_mats=mats, name=f"banded(b={b}, diag={include_diag})")
 
-def block_reynolds_project(A: np.ndarray, blocks):
-    """
-    Project a matrix onto the block-permutation fixed space:
-    entries become constant on each (block_i, block_j) rectangle.
-    """
-    n = A.shape[0]
-    A = 0.5 * (A + A.T)
-    out = np.zeros_like(A)
-    for bi, I in enumerate(blocks):
-        for bj, J in enumerate(blocks):
-            sub = A[np.ix_(I, J)]
-            out[np.ix_(I, J)] = np.mean(sub)
-    out = 0.5 * (out + out.T)
-    return out
 
 def make_blocks(n: int, r: int):
     """
@@ -219,3 +204,228 @@ def make_block_fixed_basis_offdiag(n: int, blocks):
             mats.append(D)
 
     return SymBasis(n=n, dense_mats=mats, name=f"block_fixed_offdiag_r={len(blocks)}_m={len(mats)}")
+
+
+def make_blocks_variable(n: int, sizes=None, r: int = None, seed: int = 0):
+    """
+    Return a list of index lists (0-based). Either provide explicit sizes (sum to n),
+    or sample random positive sizes for r blocks.
+    """
+    rng = np.random.default_rng(seed)
+
+    if sizes is None:
+        assert r is not None and r >= 1
+        # random positive sizes summing to n
+        cuts = np.sort(rng.choice(np.arange(1, n), size=r-1, replace=False))
+        sizes = np.diff(np.concatenate(([0], cuts, [n]))).tolist()
+    else:
+        assert sum(sizes) == n and all(s > 0 for s in sizes)
+
+    blocks = []
+    start = 0
+    for s in sizes:
+        blocks.append(list(range(start, start + s)))
+        start += s
+    return blocks
+
+
+def make_block_constant_spd(blocks,
+                            seed: int = 0,
+                            diag_range=(4.0, 7.0),
+                            within_range=(0.4, 1.0),
+                            cross_range=(1.2, 2.4),
+                            diag_margin=0.5):
+    """
+    Construct a symmetric block-constant matrix A with:
+      - different diagonal levels per block
+      - different within-block offdiag per block
+      - different cross-block constants per pair (typically larger for visibility)
+
+    Then enforce strict diagonal dominance -> SPD.
+    """
+    rng = np.random.default_rng(seed)
+    n = sum(len(I) for I in blocks)
+    k = len(blocks)
+
+    d = rng.uniform(*diag_range, size=k)          # diagonal per block
+    u = rng.uniform(*within_range, size=k)        # within-block offdiag per block
+
+    # cross-block constants (symmetric)
+    c = np.zeros((k, k))
+    for a in range(k):
+        for b in range(a+1, k):
+            c[a, b] = c[b, a] = rng.uniform(*cross_range)
+
+    A = np.zeros((n, n), dtype=float)
+
+    # fill blocks
+    for a, Ia in enumerate(blocks):
+        for ii, i in enumerate(Ia):
+            A[i, i] = d[a]
+            for jj, j in enumerate(Ia):
+                if i != j:
+                    A[i, j] = u[a]
+
+    # fill cross-block
+    for a in range(k):
+        for b in range(a+1, k):
+            Ia, Ib = blocks[a], blocks[b]
+            for i in Ia:
+                for j in Ib:
+                    A[i, j] = A[j, i] = c[a, b]
+
+    # Make SPD by strict diagonal dominance (Gershgorin / sufficient for SPD)
+    for i in range(n):
+        off = np.sum(np.abs(A[i, :])) - abs(A[i, i])
+        A[i, i] = off + diag_margin + abs(A[i, i])
+
+    return A, {"d": d, "u": u, "c": c}
+
+
+
+def spd_mixed_fbm(N: int, H: float = 0.75, alpha: float = 1.0, delta_t: float = 1.0) -> np.ndarray:
+    """
+    Mixed fractional Brownian motion covariance matrix.
+
+    Models a discrete-time market with two processes:
+      - X_i^1 = W_{i*dt} - W_{(i-1)*dt} + alpha * (B^H_{i*dt} - B^H_{(i-1)*dt})  (mixed index)
+      - X_i^2 = W_{i*dt} - W_{(i-1)*dt}  (pure Brownian increment)
+
+    The covariance matrix Sigma is 2N x 2N with entries:
+      Sigma[i,j] = (alpha^2 / 2^{1+2H}) * dt^{2H} * (|i-j+2|^{2H} + |i-j-2|^{2H} - 2|i-j|^{2H})
+                   if i,j are both odd (fBm increment covariance between mixed indices)
+      Sigma[i,j] = dt   if j is even and (i == j or i == j-1)
+      Sigma[i,j] = dt   if j is odd and i == j+1
+      Sigma[i,j] = 0    otherwise
+
+    Parameters
+    ----------
+    N : int
+        Number of time steps. Matrix size is 2N x 2N.
+    H : float, default 0.75
+        Hurst parameter in (0,1). For H > 3/4, the mixed model is arbitrage-free.
+    alpha : float, default 1.0
+        Weight of the fractional component in the mixed index.
+    delta_t : float, default 1.0
+        Time step size.
+
+    Returns
+    -------
+    Sigma : np.ndarray
+        The 2N x 2N covariance matrix (SPD).
+
+    References
+    ----------
+    Cheridito (2001), "Mixed fractional Brownian motion", Bernoulli 7(6):913-934.
+    """
+    n = 2 * N
+    Sigma = np.zeros((n, n), dtype=float)
+
+    # Precompute fBm increment factor
+    factor = (alpha ** 2) / (2 ** (1 + 2 * H)) * (delta_t ** (2 * H))
+
+    for i in range(n):
+        for j in range(n):
+            i1 = i + 1  # 1-based index
+            j1 = j + 1
+
+            if (i1 % 2 == 1) and (j1 % 2 == 1):
+                # Both odd: fBm increment covariance
+                diff = (i1 - j1) // 2  # difference in time indices
+                Sigma[i, j] = factor * (
+                    np.abs(diff + 1) ** (2 * H)
+                    + np.abs(diff - 1) ** (2 * H)
+                    - 2 * np.abs(diff) ** (2 * H)
+                )
+            elif (j1 % 2 == 0) and (i1 == j1 or i1 == j1 - 1):
+                # j even, i == j or i == j-1
+                Sigma[i, j] = delta_t
+            elif (j1 % 2 == 1) and (i1 == j1 + 1):
+                # j odd, i == j+1
+                Sigma[i, j] = delta_t
+
+    # Add BM variance on diagonal for even indices (pure BM increments)
+    for i in range(n):
+        if (i + 1) % 2 == 0:  # even 1-based index
+            Sigma[i, i] = delta_t
+
+    # Add mixed index variance on diagonal for odd indices
+    # Var(X_i^1) = Var(W increment) + alpha^2 * Var(fBM increment)
+    # = dt + alpha^2 * dt^{2H} * 2^{-2H} (since |1|^{2H} + |-1|^{2H} - 2*0 = 2)
+    for i in range(n):
+        if (i + 1) % 2 == 1:  # odd 1-based index
+            Sigma[i, i] = delta_t + factor * 2  # 2 comes from (1 + 1 - 0)
+
+    return Sigma
+
+
+def make_block_support_basis_offdiag(n: int, blocks, active_pairs=None, active_within=True):
+    """
+    Robust basis for a big G-invariant subspace S from an active block-support pattern.
+    Accepts blocks as list-of-lists OR dict -> block indices, possibly numpy arrays.
+    Ensures indices are 0-based ints in [0, n-1].
+    """
+
+    def _as_int_list(block):
+        # block can be list/np.array/etc
+        arr = np.asarray(block).reshape(-1)
+
+        # cast to int (handles float arrays like [0.,1.,2.])
+        idx = [int(x) for x in arr.tolist()]
+
+        return idx
+
+    # --- normalize blocks container: dict -> list, then each block -> list[int]
+    if isinstance(blocks, dict):
+        # order blocks deterministically by their smallest index
+        block_list = list(blocks.values())
+        block_list = sorted(block_list, key=lambda b: float(np.min(np.asarray(b))))
+        blocks = block_list
+
+    blocks = [_as_int_list(b) for b in blocks]
+
+    # --- detect and fix 1-based indexing (common gotcha)
+    all_idx = [i for blk in blocks for i in blk]
+    if len(all_idx) == 0:
+        raise ValueError("blocks is empty")
+    mn, mx = min(all_idx), max(all_idx)
+    if mn == 1 and mx == n:
+        blocks = [[i - 1 for i in blk] for blk in blocks]
+
+    # --- validate range
+    for blk in blocks:
+        for i in blk:
+            if not (0 <= i < n):
+                raise ValueError(f"Block index {i} out of range [0,{n-1}]. "
+                                 f"(Are blocks 1-based or mismatched with n?)")
+
+    k = len(blocks)
+    if active_pairs is None:
+        active_pairs = [(a, b) for a in range(k) for b in range(a + 1, k)]
+
+    mats = []
+
+    # within-block arbitrary offdiag
+    if active_within:
+        for a in range(k):
+            I = blocks[a]
+            for ii in range(len(I)):
+                for jj in range(ii + 1, len(I)):
+                    i, j = I[ii], I[jj]
+                    D = np.zeros((n, n), dtype=float)
+                    D[i, j] = 1.0
+                    D[j, i] = 1.0
+                    mats.append(D)
+
+    # cross-block arbitrary
+    for (a, b) in active_pairs:
+        Ia, Ib = blocks[a], blocks[b]
+        for i in Ia:
+            for j in Ib:
+                D = np.zeros((n, n), dtype=float)
+                D[i, j] = 1.0
+                D[j, i] = 1.0
+                mats.append(D)
+
+    return SymBasis(n=n, dense_mats=mats, name=f"block_support_offdiag_k={k}_m={len(mats)}")
+

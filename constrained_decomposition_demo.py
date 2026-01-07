@@ -10,32 +10,8 @@ import os
 import time
 import numpy as np
 
-from constrained_decomposition_core import (
-    SymBasis,
-    TridiagC_Basis,
-    constrained_decomposition,
-    constrained_decomposition_dual,
-    constrained_decomposition_group_invariant,
-    constrained_decomposition_circulant,
-    make_orthogonal_complement_basis,
-    spd_inverse,
-)
-
-from constrained_decomposition_matrices import (
-    spd_hilbert,
-    spd_toeplitz_ar1,
-    spd_brownian,
-    spd_gaussian_kernel,
-    spd_fractional_BM,
-    make_random_spd,
-    make_banded_spd,
-    make_offdiag_pair_basis,
-    make_banded_basis,
-    block_reynolds_project,
-    make_blocks,
-    make_block_fixed_spd,
-    make_block_fixed_basis_offdiag,
-)
+from constrained_decomposition_core import *
+from constrained_decomposition_matrices import *
 
 from constrained_decomposition_viz import plot_decomposition_heatmaps
 
@@ -45,27 +21,63 @@ def time_solve(solve_fn, A, basis, **kwargs):
     sol = solve_fn(A, basis, **kwargs)
     t1 = time.perf_counter()
     return sol, (t1 - t0)
-def solve_primal(A, basis, method="newton", **kwargs):
-    B, C, x, info = constrained_decomposition(
+
+
+def solve_primal(A, basis, log_prefix="", **kwargs):
+    verbose_local = kwargs.pop("verbose", globals().get("verbose", False))
+    group = kwargs.pop("group", None)
+
+    # Pop common args so they aren't passed twice via **kwargs
+    method = kwargs.pop("method", "newton")
+    tol = kwargs.pop("tol", 1e-8)
+    max_iter = kwargs.pop("max_iter", 500)
+
+    if group is None:
+        B, C, x, info = constrained_decomposition(
+            A=A,
+            basis=basis,
+            method=method,
+            tol=tol,
+            max_iter=max_iter,
+            return_info=True,
+            verbose=verbose_local,
+            log_prefix=log_prefix,
+            **kwargs,
+        )
+        return {"B": B, "C": C, "x": x, "solver": "primal", "info": info}
+
+    # group-reduced solve: reduce basis only, keep A (theorem regime)
+    B, C, x, basis_G, info = constrained_decomposition_group_invariant(
         A=A,
         basis=basis,
+        group=group,
+        solver="primal",
         method=method,
-        tol=1e-8,
-        max_iter=300,
-        verbose=verbose,
+        tol=tol,
+        max_iter=max_iter,
+        verbose=verbose_local,
         return_info=True,
+        log_prefix=log_prefix,
+        enforce_A_fixed=True,        # theorem mode: A must be G-fixed
+        project_A_if_needed=False,   # do NOT silently change A in demo
+        invariant_tol=1e-10,
         **kwargs,
     )
-    return {"B": B, "C": C, "x": x, "solver": f"primal-{method}", "info": info}
+    return {"B": B, "C": C, "x": x, "solver": "primal-group", "info": info, "basis_G": basis_G}
+
+
 def solve_dual(A, basis, basis_perp=None, log_prefix="", **kwargs):
-    # basis may be None for huge S (see small patch to dual solver)
+    verbose_local = kwargs.pop("verbose", globals().get("verbose", False))
+    tol = kwargs.pop("tol", 1e-8)
+    max_iter = kwargs.pop("max_iter", 300)
+
     B, C, y, basis_perp_out, info = constrained_decomposition_dual(
         A=A,
         basis=basis,
         basis_perp=basis_perp,
-        tol=1e-8,
-        max_iter=300,
-        verbose=verbose,
+        tol=tol,
+        max_iter=max_iter,
+        verbose=verbose_local,
         return_info=True,
         log_prefix=log_prefix,
         **kwargs,
@@ -144,15 +156,43 @@ if __name__ == "__main__":
     # ============================================================
     # Cache demo3 build (so we don't call make_block_fixed_spd twice)
     # ============================================================
-    _demo3_cache = {"built": False, "A": None, "basis": None}
+    # was: _demo3_cache = {"built": False, "A": None, "basis": None}
+    _demo3_cache = {"built": False, "A": None, "basis": None, "group": None}
+
+
     def build_demo3_once():
         if not _demo3_cache["built"]:
-            A3, blocks3 = make_block_fixed_spd(args.n3, r=args.blocks, seed=2)
-            basis3 = make_block_fixed_basis_offdiag(args.n3, blocks3)
+            blocks3 = make_blocks_variable(args.n3, r=args.blocks, seed=2)
+
+            A3, params3 = make_block_constant_spd(
+                blocks3,
+                seed=3,
+                diag_margin=1.0,
+                diag_range=(6.0, 10.0),
+                within_range=(0.2, 0.8),
+                cross_range=(2.0, 4.0),
+            )
+
+            k = len(blocks3)
+            all_pairs = [(a, b) for a in range(k) for b in range(a + 1, k)]
+            exclude = (0, k - 1) if k >= 2 else None
+            active_pairs = [p for p in all_pairs if p != exclude]
+
+            basis3 = make_block_support_basis_offdiag(args.n3, blocks3,
+                                                      active_pairs=active_pairs, active_within=True)
+
             _demo3_cache["A"] = A3
             _demo3_cache["basis"] = basis3
+            _demo3_cache["group"] = {"blocks": blocks3}  # <-- THIS is the key line
             _demo3_cache["built"] = True
-        return _demo3_cache["A"], _demo3_cache["basis"]
+
+        return _demo3_cache["A"], _demo3_cache["basis"], _demo3_cache["group"]
+
+
+    def build_demo3_full():
+        A3, basis3, group3 = build_demo3_once()
+        return A3, basis3, {"method": "newton", "group": group3}
+
 
     # ============================================================
     # Cache demo4/5 build (same A,basis for fair Newton vs quasi compare)
@@ -202,15 +242,14 @@ if __name__ == "__main__":
         },
         {
             "name": "demo3_block_group",
-            "title": "Group-invariant block-permutation A + reduced S^G (block-constant offdiag)  (primal)",
-            "A_type": "block-permutation invariant",
-            "S_type": "group-reduced (block-constant offdiag)",
+            "title": "Block-permutation invariant A (unequal blocks) + G-invariant large S (block-support)  (primal)",
+            "A_type": "block-exchangeable (unequal block sizes, strong cross-block)",
+            "S_type": "G-invariant block-support subspace (not G-fixed), diag=0",
             "solver": "primal-newton (group-reduced)",
-            "build": lambda: (
-                build_demo3_once()[0],
-                build_demo3_once()[1],
-                {"method": "newton"},
-            ),
+            "build": (lambda: (
+                (lambda A3, basis3, group3: (A3, basis3, {"method": "newton", "group": group3}))
+                (*build_demo3_once())
+            )),
             "solve": solve_primal,
             "plot_file": "demo3_block_group.png",
         },
@@ -258,7 +297,10 @@ if __name__ == "__main__":
         print("\n" + "=" * 72)
         print(f"[{spec['name']}] {spec['title']}")
         print(f"A_type={spec.get('A_type', '?')}, S_type={spec.get('S_type', '?')}")
-        print(f"n={A.shape[0]}, m={getattr(basis, 'm', 'implicit/NA')}, solver={spec.get('solver_tag', '?')}")
+#        print(f"n={A.shape[0]}, m={getattr(basis, 'm', 'implicit/NA')}, solver={spec.get('solver_tag', '?')}")
+        solver_tag = str(spec["solve"])
+        print(f"n={A.shape[0]}, m={getattr(basis, 'm', 'implicit/NA')}, solver={solver_tag}")
+
 
         # pass a prefix so iteration lines include the demo name
         solver_kwargs = dict(solver_kwargs)
@@ -304,7 +346,7 @@ if __name__ == "__main__":
         plot_path = os.path.join(outdir, spec["plot_file"])
         plot_decomposition_heatmaps(
             A, B, C, basis_for_check,
-            filename=plot_path,
+            out_file=plot_path,
             add_title=True,
             residual_on=residual_on
         )

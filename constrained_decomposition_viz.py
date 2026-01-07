@@ -8,11 +8,10 @@ into the solver/core modules.
 
 import numpy as np
 import matplotlib.pyplot as plt
-
 from constrained_decomposition_core import spd_inverse
 
 
-def plot_decomposition_heatmaps(A, B, C, basis, title="", out_file=None, show=False, residual_on="B"):
+def plot_decomposition_heatmaps(A, B, C, basis, add_title=True, out_file=None, show=False, residual_on="B"):
     """
     Plot 2x2 heatmaps:
         top-left:  A
@@ -94,8 +93,8 @@ def plot_decomposition_heatmaps(A, B, C, basis, title="", out_file=None, show=Fa
 
     plt.tight_layout(rect=[0, 0, 1, 0.90])
 
-    if filename is not None:
-        fig.savefig(filename, dpi=150, bbox_inches="tight")
+    if out_file is not None:
+        fig.savefig(out_file, dpi=150, bbox_inches="tight")
         plt.close(fig)
 
     return fig, axes

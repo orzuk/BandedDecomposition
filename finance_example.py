@@ -1,8 +1,12 @@
 from constrained_decomposition_core import *
+from constrained_decomposition_core import make_orthogonal_complement_basis, constrained_decomposition_dual
 from constrained_decomposition_matrices import *
+from constrained_decomposition_viz import plot_decomposition_heatmaps
 import matplotlib.pyplot as plt
 from pathlib import Path
-
+import math
+import argparse
+import time
 
 # Computing value
 # Markovian strategy:
@@ -29,16 +33,21 @@ def invest_value_general(A, log_flag = True):
         return -math.exp(0.5*(logabsdetA-logabsdetC))
 
 
-def compute_value_vs_H(H_vec, n=100):
+def compute_value_vs_H_fbm(H_vec, n=100):
     n_H = len(H_vec)
     val_vec_markovian = np.zeros(n_H)
     val_vec_general = np.zeros(n_H)
+
+    print(f"fBM: n={n}, matrix size={n}x{n}")
+    print(f"Number of H values: {n_H}")
+    total_start = time.time()
+
     for i in range(n_H):
+        print(f"\n--- H = {H_vec[i]:.4f} ({i+1}/{n_H}) ---")
+
         # Build matrix
         A = spd_fractional_BM(n, H=H_vec[i], T=1.0)
         A_inv = spd_inverse(A)
-        print("Is A pos.def? ", is_spd(A))
-        print("Is A_inv pos.def? ", is_spd(A_inv))
 
         basis = TridiagC_Basis(n)  # keeps your specialized fast case
         B_newt, C_newt, x_newt = constrained_decomposition(
@@ -47,53 +56,329 @@ def compute_value_vs_H(H_vec, n=100):
             method="newton",
             tol=1e-6,
             max_iter=500,
-            verbose=True
+            verbose=False
         )
 
         val_vec_markovian[i] = invest_value_markovian(B_newt, A)
-        print("Finished MArkovian, no do general: ")
 
-        A_diff = spd_fractional_BM(n, H=H_vec[i], T=1.0, diff_flag = True)
+        A_diff = spd_fractional_BM(n, H=H_vec[i], T=1.0, diff_flag=True)
+        val_vec_general[i] = invest_value_general(A_diff)
 
-        val_vec_general[i]  = invest_value_general(A_diff)
-        print("Run H=", H_vec[i], " val_general=", val_vec_general[i], " val_markovian=", val_vec_markovian[i])
+        print(f"  Markovian: {val_vec_markovian[i]:.6f}, General: {val_vec_general[i]:.6f}")
+
+    total_time = time.time() - total_start
+    print(f"\n=== Total time: {total_time:.2f} seconds ({total_time/n_H:.2f} sec/H value) ===")
 
     return val_vec_markovian, val_vec_general
 
+
+def make_mixed_fbm_full_info_basis(N: int):
+    """
+    Build the full-information strategy basis for mixed fBM.
+
+    S is spanned by matrices D^{k,l} ∈ M_{2N}(R), with l = 1,...,N and k ≤ 2l-2:
+        D^{k,l}_{ij} = 1 if i = k and j = 2l - 1
+        D^{k,l}_{ij} = 1 if i = 2l - 1 and j = k
+        D^{k,l}_{ij} = 0 otherwise
+
+    Dimension: O(N^2)
+    """
+    n = 2 * N
+    mats = []
+
+    for l in range(1, N + 1):  # l = 1, ..., N
+        j_col = 2 * l - 1 - 1  # 0-based: j = 2l-1 in paper -> index 2l-2
+        for k in range(1, 2 * l - 1):  # k = 1, ..., 2l-2
+            i_row = k - 1  # 0-based
+            D = np.zeros((n, n), dtype=float)
+            D[i_row, j_col] = 1.0
+            D[j_col, i_row] = 1.0
+            mats.append(D)
+
+    return SymBasis(n=n, dense_mats=mats, name=f"mixed_fbm_full_info_N={N}")
+
+
+def make_mixed_fbm_markovian_basis(N: int):
+    """
+    Build the Markovian strategy basis for mixed fBM.
+
+    S is spanned by matrices D^{l,1} and D^{l,2} for l = 1,...,N:
+
+    D^{l,1}_{ij} = 1 if i < j, j = 2l-1, and i is odd (1-based)
+                   1 if i = 2l-1, j < i, and j is odd
+                   0 otherwise
+
+    D^{l,2}_{ij} = 1 if i < j, j = 2l-1, and i is even (1-based)
+                   1 if i = 2l-1, j < i, and j is even
+                   0 otherwise
+
+    Dimension: 2N = O(N)
+    """
+    n = 2 * N
+    mats = []
+
+    for l in range(1, N + 1):  # l = 1, ..., N
+        j_col = 2 * l - 1  # 1-based index for j = 2l-1
+
+        # D^{l,1}: collect all odd i < j and odd j < i
+        D1 = np.zeros((n, n), dtype=float)
+        for i in range(1, n + 1):  # 1-based
+            # Case 1: i < j (j = 2l-1), i is odd
+            if i < j_col and (i % 2 == 1):
+                D1[i - 1, j_col - 1] = 1.0
+                D1[j_col - 1, i - 1] = 1.0
+        mats.append(D1)
+
+        # D^{l,2}: collect all even i < j and even j < i
+        D2 = np.zeros((n, n), dtype=float)
+        for i in range(1, n + 1):  # 1-based
+            # Case 1: i < j (j = 2l-1), i is even
+            if i < j_col and (i % 2 == 0):
+                D2[i - 1, j_col - 1] = 1.0
+                D2[j_col - 1, i - 1] = 1.0
+        mats.append(D2)
+
+    # Filter out zero matrices
+    mats = [D for D in mats if np.any(D != 0)]
+
+    return SymBasis(n=n, dense_mats=mats, name=f"mixed_fbm_markovian_N={N}")
+
+
+def compute_value_vs_H_mixed_fbm(H_vec, N=50, alpha=1.0, delta_t=1.0, solver="primal", strategy="both"):
+    """
+    Compute investment value vs Hurst parameter H for mixed fBM model.
+
+    For each H:
+      1. Build covariance matrix Σ = spd_mixed_fbm(N, H, alpha, delta_t)
+      2. Compute precision Λ = Σ^{-1}
+      3. For each strategy (Markovian, full-info):
+         - Build the constraint subspace S
+         - Decompose Λ = B^{-1} + C with B ⊥ S
+         - Value = -sqrt(|B|/|Σ|), log form: 0.5*(log|Σ| - log|B|)
+
+    Parameters
+    ----------
+    H_vec : array-like
+        Vector of Hurst parameters to evaluate.
+    N : int
+        Number of time steps. Matrix size is 2N x 2N.
+    alpha : float
+        Weight of fBM component in mixed index.
+    delta_t : float
+        Time step size.
+    solver : str
+        "primal" uses primal Newton (fast for small m, Markovian),
+                 raises max_m_for_full_hessian for full-info.
+        "dual" uses dual Newton for full-info (builds S⊥ explicitly).
+               Better when m is large but m⊥ = n(n+1)/2 - m is small.
+    strategy : str
+        "both" runs both Markovian and full-info strategies.
+        "markovian" runs only Markovian strategy (fast, O(N) basis).
+        "full" runs only full-info strategy (slow, O(N²) basis).
+
+    Returns
+    -------
+    val_markovian : np.ndarray or None
+        Log values for Markovian strategy (None if not computed).
+    val_full_info : np.ndarray or None
+        Log values for full-information strategy (None if not computed).
+    """
+    n_H = len(H_vec)
+    run_markovian = strategy in ("both", "markovian")
+    run_full = strategy in ("both", "full")
+
+    val_markovian = np.zeros(n_H) if run_markovian else None
+    val_full_info = np.zeros(n_H) if run_full else None
+
+    n = 2 * N
+
+    # Build bases as needed
+    basis_markov = make_mixed_fbm_markovian_basis(N) if run_markovian else None
+    basis_full = make_mixed_fbm_full_info_basis(N) if run_full else None
+
+    print(f"Mixed fBM: N={N}, matrix size={n}x{n}")
+    print(f"Strategy: {strategy}")
+
+    if run_markovian:
+        print(f"Markovian basis dimension: {basis_markov.m}")
+
+    if run_full:
+        sym_dim = n * (n + 1) // 2
+        m_full = basis_full.m
+        m_perp = sym_dim - m_full
+        print(f"Full-info basis dimension (primal m): {m_full}")
+        print(f"Full-info dual dimension (m⊥): {m_perp}")
+        print(f"Solver mode: {solver}")
+
+    # For dual solver, pre-build orthogonal complement basis (expensive but done once)
+    basis_full_perp = None
+    if run_full and solver == "dual":
+        print("Building orthogonal complement basis for full-info (this may take a moment)...")
+        t0 = time.time()
+        basis_full_perp = make_orthogonal_complement_basis(basis_full)
+        print(f"  Built S⊥ basis with dimension {basis_full_perp.m} in {time.time()-t0:.2f}s")
+
+    total_start = time.time()
+
+    for i, H in enumerate(H_vec):
+        print(f"\n--- H = {H:.4f} ({i+1}/{n_H}) ---")
+
+        # Build covariance matrix
+        Sigma = spd_mixed_fbm(N, H=H, alpha=alpha, delta_t=delta_t)
+        if not is_spd(Sigma):
+            print(f"  WARNING: Sigma not SPD for H={H}")
+            if run_markovian:
+                val_markovian[i] = np.nan
+            if run_full:
+                val_full_info[i] = np.nan
+            continue
+
+        # Precision matrix (what we decompose)
+        Lambda = spd_inverse(Sigma)
+        if not is_spd(Lambda):
+            print(f"  WARNING: Lambda not SPD for H={H}")
+            if run_markovian:
+                val_markovian[i] = np.nan
+            if run_full:
+                val_full_info[i] = np.nan
+            continue
+
+        _, log_det_Sigma = np.linalg.slogdet(Sigma)
+
+        # --- Markovian strategy (always primal Newton, m is small) ---
+        if run_markovian:
+            try:
+                B_markov, C_markov, _ = constrained_decomposition(
+                    A=Lambda,
+                    basis=basis_markov,
+                    method="newton",
+                    tol=1e-8,
+                    max_iter=500,
+                    verbose=False
+                )
+                _, log_det_B_markov = np.linalg.slogdet(B_markov)
+                val_markovian[i] = 0.5 * (log_det_Sigma - log_det_B_markov)
+                print(f"  Markovian: log(value) = {val_markovian[i]:.6f}")
+            except Exception as e:
+                print(f"  Markovian FAILED: {e}")
+                val_markovian[i] = np.nan
+
+        # --- Full-information strategy ---
+        if run_full:
+            try:
+                if solver == "dual":
+                    # Dual Newton: optimize over S⊥ directly
+                    B_full, C_full, _, _ = constrained_decomposition_dual(
+                        A=Lambda,
+                        basis=basis_full,
+                        basis_perp=basis_full_perp,
+                        tol=1e-8,
+                        max_iter=500,
+                        verbose=False
+                    )
+                else:
+                    # Primal Newton with raised Hessian limit
+                    B_full, C_full, _ = constrained_decomposition(
+                        A=Lambda,
+                        basis=basis_full,
+                        method="newton",
+                        tol=1e-8,
+                        max_iter=500,
+                        verbose=False,
+                        max_m_for_full_hessian=3000  # allow up to 3000 for N=50
+                    )
+
+                _, log_det_B_full = np.linalg.slogdet(B_full)
+                val_full_info[i] = 0.5 * (log_det_Sigma - log_det_B_full)
+                print(f"  Full-info: log(value) = {val_full_info[i]:.6f}")
+            except Exception as e:
+                print(f"  Full-info FAILED: {e}")
+                val_full_info[i] = np.nan
+
+    total_time = time.time() - total_start
+    print(f"\n=== Total time: {total_time:.2f} seconds ({total_time/n_H:.2f} sec/H value) ===")
+
+    return val_markovian, val_full_info
+
+
 if __name__ == "__main__":
+
+    parser = argparse.ArgumentParser(description="Finance example: fBM or mixed fBM")
+    parser.add_argument("--model", type=str, choices=["fbm", "mixed_fbm"], default="mixed_fbm",
+                        help="Model type: 'fbm' or 'mixed_fbm' (default: mixed_fbm)")
+    parser.add_argument("--n", type=int, default=100,
+                        help="Matrix dimension (default: 100). For mixed_fbm, N=n//2 time steps.")
+    parser.add_argument("--solver", type=str, choices=["primal", "dual"], default="primal",
+                        help="Solver for full-info: 'primal' (Newton with raised limit) or 'dual' (Newton on S⊥)")
+    parser.add_argument("--strategy", type=str, choices=["both", "markovian", "full"], default="both",
+                        help="Which strategies to run: 'both', 'markovian' (fast, O(N)), or 'full' (slow, O(N²))")
+    args = parser.parse_args()
+
+    model_type = args.model
+    n = args.n
+    solver = args.solver
+    strategy = args.strategy
+    print(f"\n{'='*60}")
+    print(f"Running model: {model_type}, n={n}, solver={solver}, strategy={strategy}")
+    print(f"{'='*60}\n")
+
     # --- Experiment settings ---
-    n = 500
-    H_vec = np.linspace(0.005, 0.995, 199)   # change resolution as you like
+    H_vec = np.arange(0.02, 1.0, 0.02)  # 0.02 to 0.98 with step 0.02
+
+    if model_type == "fbm":
+        pass  # n is used directly
+    else:  # mixed_fbm
+        N = n // 2  # Number of time steps (matrix is 2N x 2N)
+        alpha = 1.0
+        delta_t = 1.0
 
     # --- Run ---
-    val_markov, val_general = compute_value_vs_H(H_vec, n=n)
+    if model_type == "fbm":
+        val_markov, val_general = compute_value_vs_H_fbm(H_vec, n=n)
+    else:  # mixed_fbm
+        val_markov, val_general = compute_value_vs_H_mixed_fbm(
+            H_vec, N=N, alpha=alpha, delta_t=delta_t, solver=solver, strategy=strategy
+        )
 
     # --- Plot ---
-    plt.figure(figsize=(7, 4))
-    plt.plot(H_vec, val_markov, label="Markovian (decomposition)")
-    plt.plot(H_vec, val_general, label="General", color="red")
-    plt.xlabel("H")
-    plt.ylabel("log(Value)")
-    plt.title(f"Strategy value vs H (n={n})")
+    plt.figure(figsize=(8, 5))
+    if val_markov is not None:
+        plt.plot(H_vec, val_markov, 'b-o', label="Markovian strategy", markersize=4)
+    if val_general is not None:
+        plt.plot(H_vec, val_general, 'r-s', label="Full-information strategy", markersize=4)
+    plt.xlabel("Hurst parameter H", fontsize=12)
+    plt.ylabel("log(Value)", fontsize=12)
+    if model_type == "mixed_fbm":
+        plt.title(f"Mixed fBM: Strategy value vs H (N={N}, α={alpha})", fontsize=13)
+        plt.axvline(x=0.75, color='gray', linestyle='--', alpha=0.5, label='H=3/4 (arbitrage-free boundary)')
+    else:
+        plt.title(f"fBM: Strategy value vs H (n={n})", fontsize=13)
     plt.legend()
+    plt.grid(True, alpha=0.3)
     plt.tight_layout()
 
-    # --- Save in figs/ next to this script (robust to PyCharm working dir) ---
+    # --- Save in figs/ next to this script ---
     here = Path(__file__).resolve().parent
-    fig_dir = here / "figs" / "new"
-    fig_dir.mkdir(exist_ok=True)
+    fig_dir = here / "figs" / model_type
+    fig_dir.mkdir(parents=True, exist_ok=True)
 
-    out_png = fig_dir / f"value_vs_H_n_{n}.png"
+    out_png = fig_dir / f"value_{model_type}_vs_H_n_{n}_{strategy}.png"
     plt.savefig(out_png, dpi=150)
-    print("Saved value figure to:", out_png)
+    print(f"\nSaved value figure to: {out_png}")
 
 
     # ---- Save decomposition heatmaps for a chosen H ----
-    H0 = 0.7  # pick one (or loop over a few)
-    A = spd_fractional_BM(n, H=H0, T=1.0, diff_flag=True)
-    A_inv = spd_inverse(A)
+    H0 = 0.8  # pick one (or loop over a few)
 
-    basis = TridiagC_Basis(n)
+    if model_type == "fbm":
+        A = spd_fractional_BM(n, H=H0, T=1.0, diff_flag=True)
+        A_inv = spd_inverse(A)
+        basis = TridiagC_Basis(n)
+    else:  # mixed_fbm
+        Sigma = spd_mixed_fbm(N, H=H0, alpha=alpha, delta_t=delta_t)
+        A_inv = spd_inverse(Sigma)
+        basis = make_mixed_fbm_markovian_basis(N)  # Use Markovian for heatmap
+
     B0, C0, x0 = constrained_decomposition(
         A=A_inv,
         basis=basis,
@@ -103,12 +388,12 @@ if __name__ == "__main__":
         verbose=False
     )
 
-    out_heat = fig_dir / f"heatmap_decomposition_H_{H0:.2f}_n_{n}.png"
+    out_heat = fig_dir / f"heatmap_{model_type}_H_{H0:.2f}_n_{n}.png"
     plot_decomposition_heatmaps(
         A=A_inv,
         B=B0,
         C=C0,
         basis=basis,
-        filename=out_heat, #       title=f"Decomposition heatmap (H={H0:.2f}, n={n})"
+        out_file=out_heat,
     )
-    print("Saved heatmap to:", out_heat)
+    print(f"Saved heatmap to: {out_heat}")

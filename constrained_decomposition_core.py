@@ -12,6 +12,45 @@ It is intentionally free of demo/CLI/plotting code.
 
 
 import numpy as np
+import time
+
+def block_reynolds_project(A: np.ndarray, blocks):
+    """
+    Reynolds projection for the within-block permutation group:
+      - for bi!=bj: entries become constant on each (block_i, block_j) rectangle
+      - for bi==bj: diagonals become constant (mean of diagonal),
+                    off-diagonals become constant (mean of off-diagonal)
+    This equals (1/|G|) sum_{P in G} P A P^T for the product of within-block permutations,
+    hence preserves SPD.
+    """
+    A = np.asarray(A, dtype=float)
+    A = 0.5 * (A + A.T)
+    out = np.zeros_like(A)
+
+    # normalize blocks to 1D int arrays
+    blk = [np.asarray(I, dtype=int).reshape(-1) for I in blocks]
+
+    for bi, I in enumerate(blk):
+        # within-block part (diagonal vs off-diagonal treated separately)
+        sub = A[np.ix_(I, I)]
+        if len(I) == 1:
+            out[np.ix_(I, I)] = sub
+        else:
+            diag_mean = float(np.mean(np.diag(sub)))
+            mask = ~np.eye(len(I), dtype=bool)
+            off_mean = float(np.mean(sub[mask])) if np.any(mask) else 0.0
+            tmp = np.full((len(I), len(I)), off_mean, dtype=float)
+            np.fill_diagonal(tmp, diag_mean)
+            out[np.ix_(I, I)] = tmp
+
+        # cross-block rectangles
+        for bj in range(bi + 1, len(blk)):
+            J = blk[bj]
+            m = float(np.mean(A[np.ix_(I, J)]))
+            out[np.ix_(I, J)] = m
+            out[np.ix_(J, I)] = m
+
+    return 0.5 * (out + out.T)
 
 
 
@@ -599,13 +638,16 @@ def constrained_decomposition(
     total_backtracks = 0
     iters_done = 0
 
+    start_iter_time = time.perf_counter() # just for first iter
     for it in range(max_iter):
         iters_done = it + 1
         g_norm = float(np.linalg.norm(g))
         max_abs_g = float(np.max(np.abs(g)))
         if verbose:
 #            lam_min = float(np.min(np.linalg.eigvalsh(M)))
-            print(f"{pfx}iter {it:4d}  phi={phi: .6e}  ||g||={g_norm: .3e}  max|g|={max_abs_g: .3e} ") #  lam_min(A-C)={lam_min: .3e}")
+            iter_time = time.perf_counter() - start_iter_time
+            print(f"{pfx}iter {it:4d}  phi={phi: .6e}  ||g||={g_norm: .3e}  max|g|={max_abs_g: .3e} time={iter_time: .3e}") #  lam_min(A-C)={lam_min: .3e}")
+            start_iter_time = time.perf_counter()
 
         if max_abs_g < tol:
             if verbose:
@@ -720,8 +762,6 @@ def constrained_decomposition(
 
     if return_info:
         return B, C, x, info
-    return B, C, x
-
     return B, C, x
 
 def make_coo_basis_from_sparse_patterns(n, patterns):
@@ -1138,17 +1178,34 @@ def _as_perm_matrix(perm, n):
 def group_average_conjugation(M, group, n=None):
     """
     Average of conjugations:  (1/|G|) sum_{P in G} P M P^T
-    group: list of permutation vectors or permutation matrices.
+
+    Supported `group` formats:
+      1) {"blocks": blocks}  -> fast closed-form Reynolds projection onto the
+         within-block permutation fixed space (uses block_reynolds_project).
+         Here `blocks` is a list of index arrays/lists.
+      2) list/iterable of permutation vectors or permutation matrices -> explicit averaging.
     """
     M = np.asarray(M, dtype=float)
     if n is None:
         n = M.shape[0]
-    out = np.zeros_like(M)
+
+    # Fast exact averaging for block-permutation group
+    if isinstance(group, dict) and ("blocks" in group):
+        out = block_reynolds_project(M, group["blocks"])
+        return 0.5 * (out + out.T)
+
+    # Explicit finite-group averaging (small groups only)
+    out = np.zeros_like(M, dtype=float)
+    cnt = 0
     for g in group:
         P = _as_perm_matrix(g, n)
         out += P @ M @ P.T
-    out /= float(len(group))
+        cnt += 1
+    if cnt == 0:
+        raise ValueError("group_average_conjugation: empty group.")
+    out /= float(cnt)
     return 0.5 * (out + out.T)
+
 
 def make_group_invariant_basis(basis: SymBasis, group, atol=1e-12, name=None):
     """
@@ -1176,6 +1233,7 @@ def make_group_invariant_basis(basis: SymBasis, group, atol=1e-12, name=None):
         raise ValueError("Group-invariant subspace is {0}. Nothing to optimize.")
     return SymBasis(n=n, dense_mats=inv_mats, name=name)
 
+
 def constrained_decomposition_group_invariant(
     A,
     basis: SymBasis,
@@ -1185,47 +1243,82 @@ def constrained_decomposition_group_invariant(
     tol=1e-8,
     max_iter=500,
     verbose=False,
+    return_info=False,
+    log_prefix="",
+    enforce_A_fixed=True,        # theorem mode
+    project_A_if_needed=False,   # robustness mode (off by default)
+    invariant_tol=1e-10,
     **kwargs,
 ):
-    """
-    Convenience wrapper:
-      1) Optionally symmetrize A under the group (recommended if A is only approximately invariant).
-      2) Restrict the search to the G-invariant part of the constraint space S (for C),
-         i.e., replace basis by make_group_invariant_basis(basis, group).
-      3) Solve either primal or dual.
-
-    solver: "primal" or "dual"
-    """
     A = np.asarray(A, dtype=float)
     n = A.shape[0]
-    A_sym = group_average_conjugation(A, group, n=n)
 
+    # Reduce to S^G
     basis_G = make_group_invariant_basis(basis, group)
 
+    # Check invariance of A (do NOT change A by default)
+    A_proj = group_average_conjugation(A, group, n=n)
+    rel = np.linalg.norm(A - A_proj, ord="fro") / max(1.0, np.linalg.norm(A, ord="fro"))
+
+    A_use = A
+    if enforce_A_fixed and rel > invariant_tol:
+        if project_A_if_needed:
+            A_use = A_proj
+            if verbose:
+                print(f"{log_prefix}[group] A not G-fixed (rel={rel:.2e}); using Pi_G(A).")
+        else:
+            raise ValueError(
+                f"A is not G-fixed: rel||A-Pi_G(A)||_F={rel:.2e} > {invariant_tol:.2e}. "
+                "Either pass invariant A, or set project_A_if_needed=True."
+            )
+
     if solver == "primal":
-        B, C, x = constrained_decomposition(
-            A=A_sym,
+        out = constrained_decomposition(
+            A=A_use,
             basis=basis_G,
             method=method,
             tol=tol,
             max_iter=max_iter,
             verbose=verbose,
+            log_prefix=log_prefix,
+            return_info=return_info,
             **kwargs,
         )
-        return B, C, x, basis_G, A_sym
+        if return_info:
+            B, C, x, info = out
+            info = dict(info)
+            info["m_G"] = getattr(basis_G, "m", None)
+            info["A_proj_rel"] = float(rel)
+            info["used_A_projection"] = bool(A_use is A_proj)
+            return B, C, x, basis_G, info
+        else:
+            B, C, x = out
+            return B, C, x, basis_G
 
     if solver == "dual":
-        B, C, y, basis_perp = constrained_decomposition_dual(
-            A=A_sym,
+        out = constrained_decomposition_dual(
+            A=A_use,
             basis=basis_G,
             tol=tol,
             max_iter=max_iter,
             verbose=verbose,
+            log_prefix=log_prefix,
+            return_info=return_info,
             **kwargs,
         )
-        return B, C, y, basis_G, basis_perp, A_sym
+        if return_info:
+            B, C, y, basis_perp, info = out
+            info = dict(info)
+            info["m_G"] = getattr(basis_G, "m", None)
+            info["A_proj_rel"] = float(rel)
+            info["used_A_projection"] = bool(A_use is A_proj)
+            return B, C, y, basis_G, basis_perp, info
+        else:
+            B, C, y, basis_perp = out
+            return B, C, y, basis_G, basis_perp
 
     raise ValueError("solver must be 'primal' or 'dual'.")
+
 
 def make_symmetric_first_col_from_half(half, n):
     half = np.asarray(half, dtype=float)  # length n//2+1 when n even
