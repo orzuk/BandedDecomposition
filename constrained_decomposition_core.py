@@ -13,6 +13,7 @@ It is intentionally free of demo/CLI/plotting code.
 
 import numpy as np
 import time
+from scipy import sparse
 
 def block_reynolds_project(A: np.ndarray, blocks):
     """
@@ -155,8 +156,44 @@ class SymBasis:
         self._cached_col_pos = None  # map: col -> position in cached_cols
         self._cached_I_pos = None    # map: idx -> position in cached_I
 
+        # Precompute concatenated COO arrays for fast coo_linear_combo
+        if self._coo is not None:
+            self._precompute_concat_coo()
+
     def is_sparse_coo(self) -> bool:
         return self._coo is not None
+
+    def _precompute_concat_coo(self):
+        """
+        Precompute concatenated COO arrays for fast coo_linear_combo.
+
+        Creates:
+          _all_rows, _all_cols, _all_vals: concatenated COO data
+          _basis_idx: which basis matrix each entry belongs to
+          _nnz_cumsum: cumulative nnz for slicing
+        """
+        if self._coo is None:
+            return
+
+        total_nnz = sum(len(r) for r, c, v in self._coo)
+        all_rows = np.empty(total_nnz, dtype=np.int32)
+        all_cols = np.empty(total_nnz, dtype=np.int32)
+        all_vals = np.empty(total_nnz, dtype=np.float64)
+        basis_idx = np.empty(total_nnz, dtype=np.int32)
+
+        offset = 0
+        for l, (rows, cols, vals) in enumerate(self._coo):
+            k = len(rows)
+            all_rows[offset:offset + k] = rows
+            all_cols[offset:offset + k] = cols
+            all_vals[offset:offset + k] = vals
+            basis_idx[offset:offset + k] = l
+            offset += k
+
+        self._all_rows = all_rows
+        self._all_cols = all_cols
+        self._all_vals = all_vals
+        self._basis_idx = basis_idx
 
     # -----------------------------
     # Default linear map C(x)
@@ -246,6 +283,9 @@ class SymBasis:
         cols = np.unique(np.concatenate([cols for (rows, cols, vals) in self._coo])).astype(int)
         self._cached_cols = cols
         self._cached_col_pos = {int(c): t for t, c in enumerate(cols)}
+        # Array version for vectorized lookup
+        self._cached_col_pos_arr = np.full(self.n, -1, dtype=np.int32)
+        self._cached_col_pos_arr[cols] = np.arange(len(cols), dtype=np.int32)
         return cols
 
     def required_indices_rows_cols(self, rebuild_cache=False):
@@ -263,48 +303,57 @@ class SymBasis:
         I = np.unique(np.concatenate([all_rows, all_cols])).astype(int)
         self._cached_I = I
         self._cached_I_pos = {int(i): t for t, i in enumerate(I)}
+        # Array version for vectorized lookup
+        self._cached_I_pos_arr = np.full(self.n, -1, dtype=np.int32)
+        self._cached_I_pos_arr[I] = np.arange(len(I), dtype=np.int32)
         return I
 
     # -----------------------------
     # COO trace from selected columns
     # -----------------------------
-    def trace_from_selected_cols(self, Z, col_pos=None):
+    def trace_from_selected_cols(self, Z, col_pos_arr=None):
         """
         Compute g_k = tr(B Dk) from Z = B[:, J] where J = required_columns_for_traces().
+
+        Vectorized: uses precomputed concatenated COO arrays.
         """
         if self._coo is None:
             raise ValueError("trace_from_selected_cols requires COO basis.")
-        if col_pos is None:
-            if self._cached_col_pos is None:
+        if col_pos_arr is None:
+            if self._cached_col_pos_arr is None:
                 self.required_columns_for_traces(rebuild_cache=True)
-            col_pos = self._cached_col_pos
+            col_pos_arr = self._cached_col_pos_arr
 
-        g = np.zeros(self.m, dtype=float)
-        for k, (rows, cols, vals) in enumerate(self._coo):
-            acc = 0.0
-            for i, j, v in zip(rows, cols, vals):
-                acc += v * Z[i, col_pos[int(j)]]
-            g[k] = float(acc)
+        # Vectorized: look up all (row, col_pos[col]) entries at once
+        row_idx = self._all_rows
+        col_idx = col_pos_arr[self._all_cols]
+        products = self._all_vals * Z[row_idx, col_idx]
+
+        # Sum by basis index using bincount
+        g = np.bincount(self._basis_idx, weights=products, minlength=self.m)
         return g
 
-    def trace_from_small_G(self, G, I_pos=None):
+    def trace_from_small_G(self, G, I_pos=None, I_pos_arr=None):
         """
         Compute h_k = sum_{(i,j)} Dk_ij * W_ij where W restricted to I×I is represented by G.
         Here G[p,q] = W[I[p], I[q]].
+
+        Vectorized: uses precomputed concatenated COO arrays.
         """
         if self._coo is None:
             raise ValueError("trace_from_small_G requires COO basis.")
-        if I_pos is None:
-            if self._cached_I_pos is None:
+        if I_pos_arr is None:
+            if self._cached_I_pos_arr is None:
                 self.required_indices_rows_cols(rebuild_cache=True)
-            I_pos = self._cached_I_pos
+            I_pos_arr = self._cached_I_pos_arr
 
-        h = np.zeros(self.m, dtype=float)
-        for k, (rows, cols, vals) in enumerate(self._coo):
-            acc = 0.0
-            for i, j, v in zip(rows, cols, vals):
-                acc += v * G[I_pos[int(i)], I_pos[int(j)]]
-            h[k] = float(acc)
+        # Vectorized: look up all G[I_pos[row], I_pos[col]] at once
+        row_idx = I_pos_arr[self._all_rows]
+        col_idx = I_pos_arr[self._all_cols]
+        products = self._all_vals * G[row_idx, col_idx]
+
+        # Sum by basis index using bincount
+        h = np.bincount(self._basis_idx, weights=products, minlength=self.m)
         return h
 
     # -----------------------------
@@ -317,7 +366,7 @@ class SymBasis:
         Returns (rows, cols, vals) with duplicates summed.
         This is used inside Hv in Newton–CG.
 
-        For large m, this is still much cheaper than dense D(v) if basis is sparse.
+        Uses precomputed concatenated arrays for O(nnz) vectorized operations.
         """
         if self._coo is None:
             raise ValueError("coo_linear_combo requires COO basis.")
@@ -325,28 +374,40 @@ class SymBasis:
         if v.size != self.m:
             raise ValueError("v has wrong length.")
 
-        # accumulate into dictionary
-        acc = {}
-        for l, (rows, cols, vals) in enumerate(self._coo):
-            a = float(v[l])
-            if a == 0.0:
-                continue
-            for i, j, val in zip(rows, cols, vals):
-                key = (int(i), int(j))
-                acc[key] = acc.get(key, 0.0) + a * float(val)
+        # Scale all vals by v[basis_idx] - fully vectorized
+        scaled_vals = self._all_vals * v[self._basis_idx]
 
-        if not acc:
-            return np.array([], dtype=int), np.array([], dtype=int), np.array([], dtype=float)
+        # Use scipy.sparse to sum duplicates
+        Dv = sparse.coo_matrix(
+            (scaled_vals, (self._all_rows, self._all_cols)),
+            shape=(self.n, self.n)
+        )
+        Dv.sum_duplicates()
 
-        rows = []
-        cols = []
-        vals = []
-        for (i, j), val in acc.items():
-            if drop_tol and abs(val) <= drop_tol:
-                continue
-            rows.append(i); cols.append(j); vals.append(val)
+        if drop_tol > 0:
+            mask = np.abs(Dv.data) > drop_tol
+            return Dv.row[mask], Dv.col[mask], Dv.data[mask]
 
-        return np.array(rows, dtype=int), np.array(cols, dtype=int), np.array(vals, dtype=float)
+        return Dv.row, Dv.col, Dv.data
+
+    def sparse_linear_combo(self, v):
+        """
+        Build scipy.sparse CSR matrix for D(v)=sum_l v_l D_l.
+
+        More efficient than coo_linear_combo when you need to do matrix-vector products.
+        """
+        if self._coo is None:
+            raise ValueError("sparse_linear_combo requires COO basis.")
+        v = np.asarray(v, dtype=float).ravel()
+        if v.size != self.m:
+            raise ValueError("v has wrong length.")
+
+        scaled_vals = self._all_vals * v[self._basis_idx]
+        Dv = sparse.csr_matrix(
+            (scaled_vals, (self._all_rows, self._all_cols)),
+            shape=(self.n, self.n)
+        )
+        return Dv
 
 
 def solve_chol_multi_rhs(L, RHS):
@@ -463,30 +524,28 @@ def hessvec_spd_coo_implicit_factory(L, basis: SymBasis, drop_tol=0.0):
     E = np.eye(n)[:, I]           # n×r
     Z = solve_chol_multi_rhs(L, E) # Z = B[:,I], dense n×r
 
-    # Precompute mapping for trace extraction
-    I_pos = basis._cached_I_pos
-    if I_pos is None:
+    # Precompute mapping for trace extraction (use array version for vectorized lookup)
+    I_pos_arr = basis._cached_I_pos_arr
+    if I_pos_arr is None:
         basis.required_indices_rows_cols(rebuild_cache=True)
-        I_pos = basis._cached_I_pos
+        I_pos_arr = basis._cached_I_pos_arr
 
     def Hv(v):
         v = np.asarray(v, dtype=float).ravel()
-        # build COO for D(v)
-        rows, cols, vals = basis.coo_linear_combo(v, drop_tol=drop_tol)
-        if rows.size == 0:
+        # Build sparse D(v) and compute Y = Dv @ Z using scipy.sparse
+        Dv = basis.sparse_linear_combo(v)
+        if Dv.nnz == 0:
             return np.zeros(basis.m, dtype=float)
 
-        # Y = Dv @ Z (n×r) computed by COO accumulation
-        Y = np.zeros((n, r), dtype=float)
-        for i, j, a in zip(rows, cols, vals):
-            Y[int(i), :] += float(a) * Z[int(j), :]
+        # Y = Dv @ Z (n×r) - scipy.sparse handles this efficiently
+        Y = Dv @ Z
 
         # G = Z^T @ Y (r×r)
         G = Z.T @ Y
 
         # Hv_k = sum_{(i,j) in Dk} Dk_ij * (B D(v) B)_{ij}
         # and (B D(v) B) restricted to I×I equals G
-        return basis.trace_from_small_G(G, I_pos=I_pos)
+        return basis.trace_from_small_G(G, I_pos_arr=I_pos_arr)
 
     return Hv
 

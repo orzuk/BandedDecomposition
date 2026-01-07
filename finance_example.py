@@ -74,33 +74,35 @@ def compute_value_vs_H_fbm(H_vec, n=100):
 
 def make_mixed_fbm_full_info_basis(N: int):
     """
-    Build the full-information strategy basis for mixed fBM.
+    Build the full-information strategy basis for mixed fBM (COO sparse format).
 
-    S is spanned by matrices D^{k,l} ∈ M_{2N}(R), with l = 1,...,N and k ≤ 2l-2:
+    S is spanned by matrices D^{k,l} in M_{2N}(R), with l = 1,...,N and k <= 2l-2:
         D^{k,l}_{ij} = 1 if i = k and j = 2l - 1
         D^{k,l}_{ij} = 1 if i = 2l - 1 and j = k
         D^{k,l}_{ij} = 0 otherwise
 
+    Each D^{k,l} has only 2 non-zeros, so COO is very efficient.
     Dimension: O(N^2)
     """
     n = 2 * N
-    mats = []
+    coo_mats = []
 
     for l in range(1, N + 1):  # l = 1, ..., N
         j_col = 2 * l - 1 - 1  # 0-based: j = 2l-1 in paper -> index 2l-2
         for k in range(1, 2 * l - 1):  # k = 1, ..., 2l-2
             i_row = k - 1  # 0-based
-            D = np.zeros((n, n), dtype=float)
-            D[i_row, j_col] = 1.0
-            D[j_col, i_row] = 1.0
-            mats.append(D)
+            # Each D has 2 non-zeros: (i_row, j_col) and (j_col, i_row)
+            rows = np.array([i_row, j_col], dtype=int)
+            cols = np.array([j_col, i_row], dtype=int)
+            vals = np.array([1.0, 1.0], dtype=float)
+            coo_mats.append((rows, cols, vals))
 
-    return SymBasis(n=n, dense_mats=mats, name=f"mixed_fbm_full_info_N={N}")
+    return SymBasis(n=n, coo_mats=coo_mats, name=f"mixed_fbm_full_info_N={N}")
 
 
 def make_mixed_fbm_markovian_basis(N: int):
     """
-    Build the Markovian strategy basis for mixed fBM.
+    Build the Markovian strategy basis for mixed fBM (COO sparse format).
 
     S is spanned by matrices D^{l,1} and D^{l,2} for l = 1,...,N:
 
@@ -115,33 +117,33 @@ def make_mixed_fbm_markovian_basis(N: int):
     Dimension: 2N = O(N)
     """
     n = 2 * N
-    mats = []
+    coo_mats = []
 
     for l in range(1, N + 1):  # l = 1, ..., N
         j_col = 2 * l - 1  # 1-based index for j = 2l-1
 
-        # D^{l,1}: collect all odd i < j and odd j < i
-        D1 = np.zeros((n, n), dtype=float)
+        # D^{l,1}: collect all odd i < j
+        rows1, cols1, vals1 = [], [], []
         for i in range(1, n + 1):  # 1-based
-            # Case 1: i < j (j = 2l-1), i is odd
             if i < j_col and (i % 2 == 1):
-                D1[i - 1, j_col - 1] = 1.0
-                D1[j_col - 1, i - 1] = 1.0
-        mats.append(D1)
+                # Add both (i-1, j_col-1) and (j_col-1, i-1) for symmetry
+                rows1.extend([i - 1, j_col - 1])
+                cols1.extend([j_col - 1, i - 1])
+                vals1.extend([1.0, 1.0])
+        if rows1:  # Only add if non-empty
+            coo_mats.append((np.array(rows1, dtype=int), np.array(cols1, dtype=int), np.array(vals1, dtype=float)))
 
-        # D^{l,2}: collect all even i < j and even j < i
-        D2 = np.zeros((n, n), dtype=float)
+        # D^{l,2}: collect all even i < j
+        rows2, cols2, vals2 = [], [], []
         for i in range(1, n + 1):  # 1-based
-            # Case 1: i < j (j = 2l-1), i is even
             if i < j_col and (i % 2 == 0):
-                D2[i - 1, j_col - 1] = 1.0
-                D2[j_col - 1, i - 1] = 1.0
-        mats.append(D2)
+                rows2.extend([i - 1, j_col - 1])
+                cols2.extend([j_col - 1, i - 1])
+                vals2.extend([1.0, 1.0])
+        if rows2:  # Only add if non-empty
+            coo_mats.append((np.array(rows2, dtype=int), np.array(cols2, dtype=int), np.array(vals2, dtype=float)))
 
-    # Filter out zero matrices
-    mats = [D for D in mats if np.any(D != 0)]
-
-    return SymBasis(n=n, dense_mats=mats, name=f"mixed_fbm_markovian_N={N}")
+    return SymBasis(n=n, coo_mats=coo_mats, name=f"mixed_fbm_markovian_N={N}")
 
 
 def compute_value_vs_H_mixed_fbm(H_vec, N=50, alpha=1.0, delta_t=1.0, solver="primal", method="newton", strategy="both"):
@@ -248,6 +250,7 @@ def compute_value_vs_H_mixed_fbm(H_vec, N=50, alpha=1.0, delta_t=1.0, solver="pr
         # --- Markovian strategy (primal, m is small) ---
         if run_markovian:
             try:
+                t_markov = time.time()
                 B_markov, C_markov, _, info_m = constrained_decomposition(
                     A=Lambda,
                     basis=basis_markov,
@@ -257,11 +260,12 @@ def compute_value_vs_H_mixed_fbm(H_vec, N=50, alpha=1.0, delta_t=1.0, solver="pr
                     verbose=False,
                     return_info=True,
                 )
+                t_markov = time.time() - t_markov
                 if i == 0:
                     print(f"  [Markovian using: {info_m.get('used_method', 'unknown')}]")
                 _, log_det_B_markov = np.linalg.slogdet(B_markov)
                 val_markovian[i] = 0.5 * (log_det_Sigma - log_det_B_markov)
-                print(f"  Markovian: log(value) = {val_markovian[i]:.6f}")
+                print(f"  Markovian: log(value) = {val_markovian[i]:.6f} ({t_markov:.2f}s, {info_m['iters']} iters)")
             except Exception as e:
                 print(f"  Markovian FAILED: {e}")
                 val_markovian[i] = np.nan
@@ -269,6 +273,7 @@ def compute_value_vs_H_mixed_fbm(H_vec, N=50, alpha=1.0, delta_t=1.0, solver="pr
         # --- Full-information strategy ---
         if run_full:
             try:
+                t_full = time.time()
                 if solver == "dual":
                     # Dual Newton: optimize over S⊥ directly
                     B_full, C_full, _, _ = constrained_decomposition_dual(
@@ -279,6 +284,7 @@ def compute_value_vs_H_mixed_fbm(H_vec, N=50, alpha=1.0, delta_t=1.0, solver="pr
                         max_iter=500,
                         verbose=False
                     )
+                    info = {"iters": "?", "used_method": "dual"}
                 else:
                     # Primal with specified method (auto-switches to newton-cg for large m)
                     B_full, C_full, _, info = constrained_decomposition(
@@ -292,10 +298,11 @@ def compute_value_vs_H_mixed_fbm(H_vec, N=50, alpha=1.0, delta_t=1.0, solver="pr
                     )
                     if i == 0:  # Print method used on first H
                         print(f"  [Full-info using: {info.get('used_method', 'unknown')}]")
+                t_full = time.time() - t_full
 
                 _, log_det_B_full = np.linalg.slogdet(B_full)
                 val_full_info[i] = 0.5 * (log_det_Sigma - log_det_B_full)
-                print(f"  Full-info: log(value) = {val_full_info[i]:.6f}")
+                print(f"  Full-info: log(value) = {val_full_info[i]:.6f} ({t_full:.2f}s, {info['iters']} iters)")
             except Exception as e:
                 print(f"  Full-info FAILED: {e}")
                 val_full_info[i] = np.nan
@@ -332,7 +339,7 @@ if __name__ == "__main__":
     print(f"{'='*60}\n")
 
     # --- Experiment settings ---
-    H_vec = np.arange(0.02, 1.0, 0.02)  # 0.02 to 0.98 with step 0.02
+    H_vec = np.arange(0.1, 1.0, 0.1)  # 0.1 to 0.9 with step 0.1 (coarse for profiling)
 
     if model_type == "fbm":
         pass  # n is used directly
