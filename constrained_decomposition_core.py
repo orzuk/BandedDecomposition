@@ -14,6 +14,7 @@ It is intentionally free of demo/CLI/plotting code.
 import numpy as np
 import time
 from scipy import sparse
+from scipy import linalg as sp_linalg
 
 def block_reynolds_project(A: np.ndarray, blocks):
     """
@@ -268,6 +269,32 @@ class SymBasis:
         return H
 
     # -----------------------------
+    # Bandwidth detection for banded optimization
+    # -----------------------------
+    def max_bandwidth(self):
+        """
+        Compute the maximum bandwidth of all basis matrices.
+
+        Returns the maximum |i - j| over all non-zero entries in all Dk.
+        If all Dk have bandwidth <= b and A has bandwidth <= b,
+        then M = A - C(x) has bandwidth <= b, enabling O(n·b²) Cholesky.
+        """
+        if self._coo is not None:
+            max_bw = 0
+            for rows, cols, vals in self._coo:
+                if len(rows) > 0:
+                    bw = np.max(np.abs(rows - cols))
+                    max_bw = max(max_bw, bw)
+            return int(max_bw)
+        elif self._dense is not None:
+            max_bw = 0
+            for Dk in self._dense:
+                bw_l, bw_u = detect_bandwidth(Dk)
+                max_bw = max(max_bw, bw_l, bw_u)
+            return max_bw
+        return 0
+
+    # -----------------------------
     # COO caches
     # -----------------------------
     def required_columns_for_traces(self, rebuild_cache=False):
@@ -420,6 +447,317 @@ def solve_chol_multi_rhs(L, RHS):
     return X
 
 
+# =============================================================================
+# Banded Cholesky utilities (O(n·b²) instead of O(n³))
+# =============================================================================
+
+def detect_bandwidth(M, tol=1e-14):
+    """
+    Detect the bandwidth of a matrix M.
+    Returns (lower_bw, upper_bw) where bandwidth = max(lower_bw, upper_bw).
+    For symmetric matrices, lower_bw == upper_bw.
+    """
+    M = np.asarray(M)
+    n = M.shape[0]
+    lower_bw = 0
+    upper_bw = 0
+    for i in range(n):
+        for j in range(i):
+            if abs(M[i, j]) > tol:
+                lower_bw = max(lower_bw, i - j)
+        for j in range(i + 1, n):
+            if abs(M[i, j]) > tol:
+                upper_bw = max(upper_bw, j - i)
+    return lower_bw, upper_bw
+
+
+def dense_to_banded_lower(M, bandwidth):
+    """
+    Convert dense symmetric matrix M to lower-banded storage format for scipy.
+
+    Returns ab of shape (bandwidth+1, n) where:
+      ab[k, j] = M[j+k, j] for k = 0, ..., bandwidth
+
+    This is the format expected by scipy.linalg.cholesky_banded with lower=True.
+    """
+    M = np.asarray(M)
+    n = M.shape[0]
+    b = bandwidth
+    ab = np.zeros((b + 1, n), dtype=float)
+    for k in range(b + 1):
+        for j in range(n - k):
+            ab[k, j] = M[j + k, j]
+    return ab
+
+
+def banded_to_dense_lower(ab, n):
+    """
+    Convert lower-banded storage back to dense symmetric matrix.
+    """
+    b = ab.shape[0] - 1
+    M = np.zeros((n, n), dtype=float)
+    for k in range(b + 1):
+        for j in range(n - k):
+            M[j + k, j] = ab[k, j]
+            M[j, j + k] = ab[k, j]  # symmetric
+    return M
+
+
+def cholesky_banded(M, bandwidth):
+    """
+    Compute Cholesky factorization of banded SPD matrix M.
+
+    Returns (Lb, bandwidth) where Lb is in lower-banded storage format.
+    Complexity: O(n · bandwidth²) instead of O(n³).
+    """
+    ab = dense_to_banded_lower(M, bandwidth)
+    cb = sp_linalg.cholesky_banded(ab, lower=True)
+    return cb, bandwidth
+
+
+def solve_chol_banded_multi_rhs(Lb, bandwidth, RHS):
+    """
+    Solve (L L^T) X = RHS using banded Cholesky factor Lb.
+
+    Lb is in lower-banded storage format from cholesky_banded.
+    Complexity: O(n · bandwidth) per RHS column.
+    """
+    RHS = np.asarray(RHS)
+    if RHS.ndim == 1:
+        return sp_linalg.cho_solve_banded((Lb, True), RHS)
+    else:
+        # Multi-RHS: solve column by column
+        n, r = RHS.shape
+        X = np.empty((n, r), dtype=float)
+        for j in range(r):
+            X[:, j] = sp_linalg.cho_solve_banded((Lb, True), RHS[:, j])
+        return X
+
+
+class CholeskyBackend:
+    """
+    Abstraction for Cholesky factorization supporting different matrix structures.
+
+    Supported structures:
+      - "dense": standard O(n³) Cholesky (default)
+      - "banded": O(n·b²) banded Cholesky, requires bandwidth parameter
+      - "tridiagonal": special case of banded with bandwidth=1
+
+    Usage:
+        backend = CholeskyBackend("banded", bandwidth=3)
+        L = backend.factor(M)
+        X = backend.solve(L, RHS)
+    """
+
+    def __init__(self, structure="dense", bandwidth=None):
+        """
+        Parameters
+        ----------
+        structure : str
+            "dense", "banded", or "tridiagonal"
+        bandwidth : int, optional
+            Required for "banded". For "tridiagonal", bandwidth=1 is used.
+        """
+        self.structure = structure
+        if structure == "tridiagonal":
+            self.bandwidth = 1
+        elif structure == "banded":
+            if bandwidth is None:
+                raise ValueError("bandwidth required for banded structure")
+            self.bandwidth = bandwidth
+        else:
+            self.bandwidth = None
+
+    def factor(self, M):
+        """
+        Compute Cholesky factorization of M.
+
+        Returns a factor object that can be passed to solve().
+        """
+        if self.structure == "dense":
+            L = np.linalg.cholesky(M)
+            return ("dense", L)
+        elif self.structure in ("banded", "tridiagonal"):
+            Lb, bw = cholesky_banded(M, self.bandwidth)
+            return ("banded", Lb, bw)
+        else:
+            raise ValueError(f"Unknown structure: {self.structure}")
+
+    def solve(self, factor, RHS):
+        """
+        Solve (L L^T) X = RHS given factor from factor().
+        """
+        if factor[0] == "dense":
+            _, L = factor
+            return solve_chol_multi_rhs(L, RHS)
+        elif factor[0] == "banded":
+            _, Lb, bw = factor
+            return solve_chol_banded_multi_rhs(Lb, bw, RHS)
+        else:
+            raise ValueError(f"Unknown factor type: {factor[0]}")
+
+    def logdet(self, factor):
+        """
+        Compute log-determinant from Cholesky factor.
+        log|M| = 2 * sum(log(diag(L)))
+        """
+        if factor[0] == "dense":
+            _, L = factor
+            return 2.0 * np.sum(np.log(np.diag(L)))
+        elif factor[0] == "banded":
+            _, Lb, bw = factor
+            # First row of Lb contains diagonal of L
+            return 2.0 * np.sum(np.log(Lb[0, :]))
+        else:
+            raise ValueError(f"Unknown factor type: {factor[0]}")
+
+
+# =============================================================================
+# Matrix structure detection
+# =============================================================================
+
+def is_toeplitz(A, tol=1e-10):
+    """
+    Check if matrix A is Toeplitz (constant along diagonals).
+
+    Toeplitz means A[i,j] depends only on (i-j).
+    """
+    A = np.asarray(A)
+    n = A.shape[0]
+    for d in range(-n + 1, n):
+        if d >= 0:
+            diag_vals = [A[i, i + d] for i in range(n - d)]
+        else:
+            diag_vals = [A[i - d, i] for i in range(n + d)]
+        if len(diag_vals) > 1:
+            if np.max(np.abs(np.array(diag_vals) - diag_vals[0])) > tol * (1 + np.abs(diag_vals[0])):
+                return False
+    return True
+
+
+def is_circulant(A, tol=1e-10):
+    """
+    Check if matrix A is circulant (each row is cyclic shift of previous).
+
+    Circulant is a special case of Toeplitz where A[i,j] = c[(j-i) mod n].
+    """
+    A = np.asarray(A)
+    n = A.shape[0]
+    if n < 2:
+        return True
+    c = A[0, :]  # first row
+    for i in range(1, n):
+        expected = np.roll(c, i)
+        if not np.allclose(A[i, :], expected, atol=tol, rtol=0):
+            return False
+    return True
+
+
+def detect_matrix_structure(A, tol=1e-10):
+    """
+    Detect the structure of matrix A.
+
+    Returns a dict with:
+      - 'structure': one of 'dense', 'banded', 'tridiagonal', 'diagonal', 'toeplitz', 'circulant'
+      - 'bandwidth': int (for banded/tridiagonal)
+      - 'sparsity': fraction of zeros
+
+    Priority order (most specific first):
+      diagonal < tridiagonal < banded < toeplitz < circulant < dense
+    """
+    A = np.asarray(A)
+    n = A.shape[0]
+
+    # Compute bandwidth
+    bw_lower, bw_upper = detect_bandwidth(A, tol=tol)
+    bw = max(bw_lower, bw_upper)
+
+    # Count non-zeros
+    nnz = np.sum(np.abs(A) > tol)
+    sparsity = 1.0 - nnz / (n * n)
+
+    result = {
+        'bandwidth': bw,
+        'sparsity': sparsity,
+        'n': n,
+    }
+
+    # Check from most specific to least
+    if bw == 0:
+        result['structure'] = 'diagonal'
+    elif bw == 1:
+        result['structure'] = 'tridiagonal'
+    elif bw < n // 4:  # heuristic: banded if bandwidth < n/4
+        result['structure'] = 'banded'
+    elif is_circulant(A, tol=tol):
+        result['structure'] = 'circulant'
+    elif is_toeplitz(A, tol=tol):
+        result['structure'] = 'toeplitz'
+    else:
+        result['structure'] = 'dense'
+
+    return result
+
+
+def auto_select_cholesky_backend(A, basis, verbose=False):
+    """
+    Automatically select the best Cholesky backend given A and basis.
+
+    Checks:
+      1. Structure of A (banded, Toeplitz, etc.)
+      2. Whether basis matrices preserve the structure
+      3. Cost-benefit of specialized vs dense Cholesky
+
+    Returns:
+      CholeskyBackend or None (None means use default dense)
+
+    Usage:
+      backend = auto_select_cholesky_backend(A, basis, verbose=True)
+      B, C, x = constrained_decomposition(A, basis, cholesky_backend=backend)
+    """
+    A = np.asarray(A)
+    n = A.shape[0]
+
+    # Detect A's structure
+    A_info = detect_matrix_structure(A)
+    A_struct = A_info['structure']
+    A_bw = A_info['bandwidth']
+
+    # Get basis bandwidth
+    basis_bw = basis.max_bandwidth()
+
+    if verbose:
+        print(f"[Auto-detect] A: structure={A_struct}, bandwidth={A_bw}, n={n}")
+        print(f"[Auto-detect] Basis: m={basis.m}, max_bandwidth={basis_bw}")
+
+    # Check if banded optimization applies
+    # M = A - C(x) is banded iff both A and all Dk have bandwidth <= b
+    if A_struct in ('diagonal', 'tridiagonal', 'banded') and basis_bw <= A_bw:
+        effective_bw = max(A_bw, basis_bw)
+
+        # Cost-benefit: banded is O(n * b²), dense is O(n³)
+        # Banded wins when b² << n²
+        banded_cost = n * effective_bw ** 2
+        dense_cost = n ** 3 / 3  # approximate
+
+        if banded_cost < dense_cost * 0.5:  # at least 2x speedup
+            if verbose:
+                speedup = dense_cost / banded_cost
+                print(f"[Auto-detect] Using BANDED Cholesky (bandwidth={effective_bw}, ~{speedup:.0f}x speedup)")
+            if effective_bw == 1:
+                return CholeskyBackend("tridiagonal")
+            else:
+                return CholeskyBackend("banded", bandwidth=effective_bw)
+
+    # TODO: Add Toeplitz support when scipy.linalg.solve_toeplitz is robust enough
+    # For now, Toeplitz falls through to dense
+
+    if verbose:
+        print(f"[Auto-detect] Using DENSE Cholesky (no structure benefit detected)")
+
+    return None  # Use default dense
+
+
 def cg_solve_simple(matvec, b, tol=1e-6, max_iter=200):
     """
     Basic CG for SPD system A x = b, given matvec(x)=A@x.
@@ -456,7 +794,7 @@ def cg_solve_simple(matvec, b, tol=1e-6, max_iter=200):
     return x, {"iters": it, "converged": False, "rel_res": float(np.sqrt(rr) / b_norm)}
 
 
-def phi_grad_spd_implicit_selected(A, x, basis: SymBasis):
+def phi_grad_spd_implicit_selected(A, x, basis: SymBasis, cholesky_backend=None):
     """
     Compute phi and gradient g WITHOUT forming B.
 
@@ -468,35 +806,53 @@ def phi_grad_spd_implicit_selected(A, x, basis: SymBasis):
 
     For dense basis:
       - falls back to explicit B (no win possible without structure)
+
+    Parameters
+    ----------
+    cholesky_backend : CholeskyBackend, optional
+        If provided, uses specialized Cholesky (e.g., banded).
     """
     A = np.asarray(A, dtype=float)
     C = basis.build_C(x)
     M = A - C
-    L = np.linalg.cholesky(M)
-    phi = -_logdet_spd_from_cholesky(L)
+
+    # Cholesky factorization (dense or specialized)
+    if cholesky_backend is not None:
+        factor = cholesky_backend.factor(M)
+        phi = -cholesky_backend.logdet(factor)
+    else:
+        L = np.linalg.cholesky(M)
+        phi = -_logdet_spd_from_cholesky(L)
+        factor = ("dense", L)
 
     if not basis.is_sparse_coo():
         # dense fallback (no generic way to avoid B if you need all traces)
         n = A.shape[0]
         I = np.eye(n)
-        B = solve_chol_multi_rhs(L, I)
+        if cholesky_backend is not None:
+            B = cholesky_backend.solve(factor, I)
+        else:
+            B = solve_chol_multi_rhs(factor[1], I)
         B = 0.5 * (B + B.T)
         g = basis.trace_with(B)
-        return phi, g, L, C, M
+        return phi, g, factor, C, M
 
     n = A.shape[0]
     J = basis.required_columns_for_traces()
     if J.size == 0:
         g = np.zeros(basis.m, dtype=float)
-        return phi, g, L, C, M
+        return phi, g, factor, C, M
 
     E = np.eye(n)[:, J]           # n×|J|
-    Z = solve_chol_multi_rhs(L, E) # Z = B[:,J]
+    if cholesky_backend is not None:
+        Z = cholesky_backend.solve(factor, E)
+    else:
+        Z = solve_chol_multi_rhs(factor[1], E)
     g = basis.trace_from_selected_cols(Z)
-    return phi, g, L, C, M
+    return phi, g, factor, C, M
 
 
-def hessvec_spd_coo_implicit_factory(L, basis: SymBasis, drop_tol=0.0):
+def hessvec_spd_coo_implicit_factory(factor, basis: SymBasis, drop_tol=0.0, cholesky_backend=None):
     """
     Build a closure Hv(v) that computes (H v) for the logdet objective,
     WITHOUT forming B and WITHOUT forming the full Hessian.
@@ -509,6 +865,14 @@ def hessvec_spd_coo_implicit_factory(L, basis: SymBasis, drop_tol=0.0):
          Y = Dv @ Z  (sparse-dense)
          G = Z^T @ Y = Z^T Dv Z   (small r×r)
          Hv = basis.trace_from_small_G(G)
+
+    Parameters
+    ----------
+    factor : tuple or ndarray
+        Either a factor tuple from CholeskyBackend.factor(), or a dense L matrix
+        (for backward compatibility).
+    cholesky_backend : CholeskyBackend, optional
+        If provided and factor is a tuple, uses backend.solve().
     """
     if not basis.is_sparse_coo():
         raise ValueError("Implicit COO Hessvec requires COO basis.")
@@ -522,7 +886,15 @@ def hessvec_spd_coo_implicit_factory(L, basis: SymBasis, drop_tol=0.0):
         return Hv
 
     E = np.eye(n)[:, I]           # n×r
-    Z = solve_chol_multi_rhs(L, E) # Z = B[:,I], dense n×r
+
+    # Solve for Z = B[:, I]
+    if cholesky_backend is not None and isinstance(factor, tuple):
+        Z = cholesky_backend.solve(factor, E)
+    elif isinstance(factor, tuple) and factor[0] == "dense":
+        Z = solve_chol_multi_rhs(factor[1], E)
+    else:
+        # Backward compatibility: factor is just L
+        Z = solve_chol_multi_rhs(factor, E)
 
     # Precompute mapping for trace extraction (use array version for vectorized lookup)
     I_pos_arr = basis._cached_I_pos_arr
@@ -960,6 +1332,10 @@ def constrained_decomposition(
 
     # implicit Hv tuning
     hv_drop_tol=0.0,
+
+    # Matrix structure optimization
+    cholesky_backend=None,
+    auto_backend=False,
 ):
     """
     Methods:
@@ -978,6 +1354,24 @@ def constrained_decomposition(
         - Cholesky of M
         - multi-RHS solves for selected columns of B
         - sparse COO algebra
+
+    Matrix structure optimization:
+      cholesky_backend : CholeskyBackend or None
+        If provided, uses specialized Cholesky for structured matrices.
+        Example for banded matrices:
+          backend = CholeskyBackend("banded", bandwidth=3)
+        For tridiagonal:
+          backend = CholeskyBackend("tridiagonal")
+
+      auto_backend : bool
+        If True, automatically detect matrix structure and select the best
+        Cholesky backend. Analyzes A and basis to determine if banded,
+        tridiagonal, or other specialized factorizations can be used.
+        Overrides cholesky_backend if set.
+
+        Structure preservation: If A has bandwidth b and all basis matrices Dk
+        have bandwidth <= b, then M = A - C(x) has bandwidth b, so banded
+        Cholesky reduces cost from O(n³) to O(n·b²).
     """
     pfx = log_prefix or ""
     A = np.asarray(A, dtype=float)
@@ -1001,6 +1395,10 @@ def constrained_decomposition(
     if method not in ("gradient-descent", "quasi-newton", "newton", "newton-cg"):
         raise ValueError("method must be one of {'gradient-descent','quasi-newton','newton','newton-cg'}.")
 
+    # Auto-detect matrix structure and select best Cholesky backend
+    if auto_backend:
+        cholesky_backend = auto_select_cholesky_backend(A, basis, verbose=verbose)
+
     used_method = method
     if method == "newton" and auto_newton_cg and (m > max_m_for_full_hessian):
         used_method = "newton-cg"
@@ -1011,15 +1409,16 @@ def constrained_decomposition(
 
     # Initial evaluation (phi + g) without explicit B when possible
     if used_method in ("gradient-descent", "quasi-newton", "newton-cg"):
-        phi, g, L, C, M = phi_grad_spd_implicit_selected(A, x, basis)
+        phi, g, factor, C, M = phi_grad_spd_implicit_selected(A, x, basis, cholesky_backend=cholesky_backend)
         H = None
         g_prev = g.copy()  # for BFGS
     else:
         phi, g, H, B, C, M, L = phi_grad_hess_spd(A, x, basis, order=2)
+        factor = ("dense", L) if L is not None else None
         g_prev = None
 
-    if verbose and isinstance(L, np.ndarray) and L.ndim == 2:
-        print(f"{pfx}...  min(diag(L))={float(np.min(np.diag(L))):.3e}")
+    if verbose and isinstance(factor, tuple) and factor[0] == "dense":
+        print(f"{pfx}...  min(diag(L))={float(np.min(np.diag(factor[1]))):.3e}")
 
     if used_method == "quasi-newton":
         H_BFGS = np.eye(m)
@@ -1073,11 +1472,14 @@ def constrained_decomposition(
             lam = max(newton_damping, 0.0)
 
             if basis.is_sparse_coo():
-                Hv = hessvec_spd_coo_implicit_factory(L, basis, drop_tol=hv_drop_tol)
+                Hv = hessvec_spd_coo_implicit_factory(factor, basis, drop_tol=hv_drop_tol, cholesky_backend=cholesky_backend)
             else:
                 # dense basis fallback: Hv requires explicit B (no generic win)
                 Ieye = np.eye(n)
-                B = solve_chol_multi_rhs(L, Ieye)
+                if cholesky_backend is not None:
+                    B = cholesky_backend.solve(factor, Ieye)
+                else:
+                    B = solve_chol_multi_rhs(factor[1], Ieye)
                 B = 0.5 * (B + B.T)
                 def Hv(v):
                     # Hv = tr(Dk * (B D(v) B)) = trace_with(B D(v) B)
@@ -1128,7 +1530,7 @@ def constrained_decomposition(
         # -------------------------
         x_prev = x
         x = x_try
-        phi, g, L, C, M = phi_grad_spd_implicit_selected(A, x, basis)
+        phi, g, factor, C, M = phi_grad_spd_implicit_selected(A, x, basis, cholesky_backend=cholesky_backend)
 
         # BFGS update
         if used_method == "quasi-newton":
@@ -1145,7 +1547,10 @@ def constrained_decomposition(
     # finalize: return explicit B,C like before (compute B once at end)
     # (This is unavoidable if you insist on returning B explicitly.)
     Ieye = np.eye(n)
-    B = solve_chol_multi_rhs(L, Ieye)
+    if cholesky_backend is not None:
+        B = cholesky_backend.solve(factor, Ieye)
+    else:
+        B = solve_chol_multi_rhs(factor[1], Ieye)
     B = 0.5 * (B + B.T)
 
     final_g = basis.trace_with(B)
