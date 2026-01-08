@@ -364,10 +364,10 @@ def spd_sum_fbm(n: int, H: float = 0.75, alpha: float = 1.0) -> np.ndarray:
     Sum of BM and fBM covariance matrix (increments).
 
     Models observing the sum process: X_i = W_i - W_{i-1} + alpha * (B^H_i - B^H_{i-1})
-    where W is standard BM and B^H is fBM with Hurst parameter H.
+    where W is standard BM and B^H is fBM with Hurst parameter H, assumed independent.
 
     The covariance matrix Gamma is n x n with entries:
-      Gamma_ij = (alpha^2/n) * delta_ij + (alpha^2 / (2 * n^{2H})) * (|i-j+1|^{2H} + |i-j-1|^{2H} - 2|i-j|^{2H})
+      Gamma_ij = (1/n) * delta_ij + (alpha^2 / (2 * n^{2H})) * (|i-j+1|^{2H} + |i-j-1|^{2H} - 2|i-j|^{2H})
 
     where delta_ij is Kronecker delta.
 
@@ -406,9 +406,9 @@ def spd_sum_fbm(n: int, H: float = 0.75, alpha: float = 1.0) -> np.ndarray:
             )
             Gamma[i, j] = factor * fbm_cov
 
-    # Add BM variance on diagonal: (alpha^2/n) * delta_ij
+    # Add BM variance on diagonal: (1/n) * delta_ij
     for i in range(n):
-        Gamma[i, i] += (alpha ** 2) / n
+        Gamma[i, i] += 1 / n
 
     return Gamma
 
