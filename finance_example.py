@@ -186,6 +186,8 @@ def compute_value_vs_H_mixed_fbm(H_vec, N=50, alpha=1.0, delta_t=1.0, solver="pr
         Log values for Markovian strategy (None if not computed).
     val_full_info : np.ndarray or None
         Log values for full-information strategy (None if not computed).
+    val_sum_fbm : np.ndarray
+        Log values for the sum strategy.
     """
     n_H = len(H_vec)
     run_markovian = strategy in ("both", "markovian")
@@ -193,6 +195,7 @@ def compute_value_vs_H_mixed_fbm(H_vec, N=50, alpha=1.0, delta_t=1.0, solver="pr
 
     val_markovian = np.zeros(n_H) if run_markovian else None
     val_full_info = np.zeros(n_H) if run_full else None
+    val_sum_fbm = np.zeros(n_H)
 
     n = 2 * N
 
@@ -226,6 +229,17 @@ def compute_value_vs_H_mixed_fbm(H_vec, N=50, alpha=1.0, delta_t=1.0, solver="pr
 
     for i, H in enumerate(H_vec):
         print(f"\n--- H = {H:.4f} ({i+1}/{n_H}) ---")
+
+        # --- Sum strategy ---
+        try:
+            t_sum = time.time()
+            Gamma_sum = spd_sum_fbm(N, H=H, alpha=alpha)
+            val_sum_fbm[i] = invest_value_sum_fbm(Gamma_sum)
+            t_sum = time.time() - t_sum
+            print(f"  Sum strategy: log(value) = {val_sum_fbm[i]:.6f} ({t_sum:.2f}s)")
+        except Exception as e:
+            print(f"  Sum strategy FAILED: {e}")
+            val_sum_fbm[i] = np.nan
 
         # Build covariance matrix
         Sigma = spd_mixed_fbm(N, H=H, alpha=alpha, delta_t=delta_t)
@@ -312,7 +326,7 @@ def compute_value_vs_H_mixed_fbm(H_vec, N=50, alpha=1.0, delta_t=1.0, solver="pr
     total_time = time.time() - total_start
     print(f"\n=== Total time: {total_time:.2f} seconds ({total_time/n_H:.2f} sec/H value) ===")
 
-    return val_markovian, val_full_info
+    return val_markovian, val_full_info, val_sum_fbm
 
 
 def _compute_single_H(args):
@@ -322,12 +336,20 @@ def _compute_single_H(args):
     run_markovian = strategy in ("both", "markovian")
     run_full = strategy in ("both", "full")
 
-    result = {"H": H, "val_markovian": np.nan, "val_full_info": np.nan,
+    result = {"H": H, "val_markovian": np.nan, "val_full_info": np.nan, "val_sum_fbm": np.nan,
               "iters_markov": 0, "iters_full": 0, "time": 0, "error": None}
 
     t_start = time.time()
 
     try:
+        # Sum strategy
+        try:
+            Gamma_sum = spd_sum_fbm(N, H=H, alpha=alpha)
+            result["val_sum_fbm"] = invest_value_sum_fbm(Gamma_sum)
+        except Exception as e:
+            # Keep processing other strategies, but log this error
+            print(f"  [H={H:.4f}] Sum strategy FAILED: {e}")
+
         # Rebuild basis from data (can't pickle SymBasis directly)
         if run_markovian:
             basis_markov = make_mixed_fbm_markovian_basis(N)
@@ -419,6 +441,7 @@ def compute_value_vs_H_mixed_fbm_parallel(H_vec, N=50, alpha=1.0, delta_t=1.0,
                 print(f"  [{completed:3d}/{n_H}] H={res['H']:.4f}: ERROR - {res['error']}")
             else:
                 info_str = []
+                info_str.append(f"sum={res['val_sum_fbm']:.6f}")
                 if run_markovian:
                     info_str.append(f"markov={res['val_markovian']:.6f} ({res['iters_markov']} it)")
                 if run_full:
@@ -428,6 +451,7 @@ def compute_value_vs_H_mixed_fbm_parallel(H_vec, N=50, alpha=1.0, delta_t=1.0,
     # Collect results in original H order
     val_markovian = np.zeros(n_H) if run_markovian else None
     val_full_info = np.zeros(n_H) if run_full else None
+    val_sum_fbm = np.zeros(n_H)
 
     for i, H in enumerate(H_vec):
         res = results_dict[H]
@@ -435,12 +459,13 @@ def compute_value_vs_H_mixed_fbm_parallel(H_vec, N=50, alpha=1.0, delta_t=1.0,
             val_markovian[i] = res["val_markovian"]
         if run_full:
             val_full_info[i] = res["val_full_info"]
+        val_sum_fbm[i] = res["val_sum_fbm"]
 
     total_time = time.time() - total_start
     print(f"\n=== Total time: {total_time:.2f} seconds ({total_time/n_H:.2f} sec/H value) ===")
     print(f"=== Parallel speedup: {workers}x theoretical, actual depends on load balance ===")
 
-    return val_markovian, val_full_info
+    return val_markovian, val_full_info, val_sum_fbm
 
 
 if __name__ == "__main__":
@@ -509,13 +534,14 @@ if __name__ == "__main__":
     # --- Run ---
     if model_type == "fbm":
         val_markov, val_general = compute_value_vs_H_fbm(H_vec, n=n)
+        val_sum = None
     else:  # mixed_fbm
         if parallel:
-            val_markov, val_general = compute_value_vs_H_mixed_fbm_parallel(
+            val_markov, val_general, val_sum = compute_value_vs_H_mixed_fbm_parallel(
                 H_vec, N=N, alpha=alpha, delta_t=delta_t, method=method, strategy=strategy, workers=workers
             )
         else:
-            val_markov, val_general = compute_value_vs_H_mixed_fbm(
+            val_markov, val_general, val_sum = compute_value_vs_H_mixed_fbm(
                 H_vec, N=N, alpha=alpha, delta_t=delta_t, solver=solver, method=method, strategy=strategy
             )
 
@@ -525,6 +551,8 @@ if __name__ == "__main__":
         plt.plot(H_vec, val_markov, 'b-o', label="Markovian strategy", markersize=4)
     if val_general is not None:
         plt.plot(H_vec, val_general, 'r-s', label="Full-information strategy", markersize=4)
+    if val_sum is not None:
+        plt.plot(H_vec, val_sum, 'g-^', label="Sum strategy (no decomp)", markersize=4)
     plt.xlabel("Hurst parameter H", fontsize=12)
     plt.ylabel("log(Value)", fontsize=12)
     if model_type == "mixed_fbm":
