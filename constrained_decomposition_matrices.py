@@ -438,7 +438,7 @@ def invest_value_sum_fbm(Gamma) -> float:
 
     # log(Value) = -sum(log(diag(Gamma^{-1}))) - log|Gamma|
     _, log_det_Gamma = np.linalg.slogdet(Gamma)
-    log_value = -np.sum(np.log(diag_Gamma_inv)) - log_det_Gamma
+    log_value = np.sum(np.log(diag_Gamma_inv)) + log_det_Gamma
 
     return log_value
 
