@@ -7,6 +7,8 @@ from pathlib import Path
 import math
 import argparse
 import time
+import multiprocessing as mp
+import os
 
 # Computing value
 # Markovian strategy:
@@ -255,7 +257,7 @@ def compute_value_vs_H_mixed_fbm(H_vec, N=50, alpha=1.0, delta_t=1.0, solver="pr
                     A=Lambda,
                     basis=basis_markov,
                     method=method,
-                    tol=1e-8,
+                    tol=5e-8,  # Slightly looser than 1e-8 to avoid numerical edge cases (e.g., H=0.6)
                     max_iter=500,
                     verbose=False,
                     return_info=True,
@@ -313,6 +315,121 @@ def compute_value_vs_H_mixed_fbm(H_vec, N=50, alpha=1.0, delta_t=1.0, solver="pr
     return val_markovian, val_full_info
 
 
+def _compute_single_H(args):
+    """Worker function for parallel H computation."""
+    H, N, alpha, delta_t, method, strategy, basis_markov_data, basis_full_data = args
+
+    run_markovian = strategy in ("both", "markovian")
+    run_full = strategy in ("both", "full")
+
+    result = {"H": H, "val_markovian": np.nan, "val_full_info": np.nan,
+              "iters_markov": 0, "iters_full": 0, "time": 0, "error": None}
+
+    t_start = time.time()
+
+    try:
+        # Rebuild basis from data (can't pickle SymBasis directly)
+        if run_markovian:
+            basis_markov = make_mixed_fbm_markovian_basis(N)
+        if run_full:
+            basis_full = make_mixed_fbm_full_info_basis(N)
+
+        # Build covariance matrix
+        Sigma = spd_mixed_fbm(N, H=H, alpha=alpha, delta_t=delta_t)
+        if not is_spd(Sigma):
+            result["error"] = "Sigma not SPD"
+            return result
+
+        Lambda = spd_inverse(Sigma)
+        if not is_spd(Lambda):
+            result["error"] = "Lambda not SPD"
+            return result
+
+        _, log_det_Sigma = np.linalg.slogdet(Sigma)
+
+        # Markovian strategy
+        if run_markovian:
+            B_markov, C_markov, _, info_m = constrained_decomposition(
+                A=Lambda, basis=basis_markov, method=method,
+                tol=5e-8, max_iter=500, verbose=False, return_info=True  # tol=5e-8 avoids H=0.6 edge case
+            )
+            _, log_det_B_markov = np.linalg.slogdet(B_markov)
+            result["val_markovian"] = 0.5 * (log_det_Sigma - log_det_B_markov)
+            result["iters_markov"] = info_m["iters"]
+
+        # Full-info strategy (primal only for parallel)
+        if run_full:
+            B_full, C_full, _, info_f = constrained_decomposition(
+                A=Lambda, basis=basis_full, method=method,
+                tol=1e-8, max_iter=500, verbose=False, return_info=True,
+                max_m_for_full_hessian=10000
+            )
+            _, log_det_B_full = np.linalg.slogdet(B_full)
+            result["val_full_info"] = 0.5 * (log_det_Sigma - log_det_B_full)
+            result["iters_full"] = info_f["iters"]
+
+    except Exception as e:
+        result["error"] = str(e)
+
+    result["time"] = time.time() - t_start
+    return result
+
+
+def compute_value_vs_H_mixed_fbm_parallel(H_vec, N=50, alpha=1.0, delta_t=1.0,
+                                          method="newton", strategy="markovian", workers=None):
+    """
+    Parallel version of compute_value_vs_H_mixed_fbm.
+
+    Parameters
+    ----------
+    workers : int or None
+        Number of worker processes. Default: cpu_count - 2
+    """
+    n_H = len(H_vec)
+    run_markovian = strategy in ("both", "markovian")
+    run_full = strategy in ("both", "full")
+
+    if workers is None:
+        workers = max(1, os.cpu_count() - 2)
+
+    n = 2 * N
+    print(f"Mixed fBM (PARALLEL): N={N}, matrix size={n}x{n}")
+    print(f"Strategy: {strategy}, Workers: {workers}")
+    print(f"H values: {n_H} (from {H_vec[0]:.4f} to {H_vec[-1]:.4f})")
+
+    # Prepare arguments for workers (basis rebuilt in each worker)
+    args_list = [(H, N, alpha, delta_t, method, strategy, None, None) for H in H_vec]
+
+    total_start = time.time()
+
+    # Run in parallel
+    with mp.Pool(processes=workers) as pool:
+        results = pool.map(_compute_single_H, args_list)
+
+    # Collect results
+    val_markovian = np.zeros(n_H) if run_markovian else None
+    val_full_info = np.zeros(n_H) if run_full else None
+
+    for i, res in enumerate(results):
+        if res["error"]:
+            print(f"  H={res['H']:.4f}: ERROR - {res['error']}")
+        else:
+            info_str = []
+            if run_markovian:
+                val_markovian[i] = res["val_markovian"]
+                info_str.append(f"markov={res['val_markovian']:.4f} ({res['iters_markov']} it)")
+            if run_full:
+                val_full_info[i] = res["val_full_info"]
+                info_str.append(f"full={res['val_full_info']:.4f} ({res['iters_full']} it)")
+            print(f"  H={res['H']:.4f}: {', '.join(info_str)} [{res['time']:.1f}s]")
+
+    total_time = time.time() - total_start
+    print(f"\n=== Total time: {total_time:.2f} seconds ({total_time/n_H:.2f} sec/H value) ===")
+    print(f"=== Parallel speedup: {workers}x theoretical, actual depends on load balance ===")
+
+    return val_markovian, val_full_info
+
+
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Finance example: fBM or mixed fBM")
@@ -330,6 +447,10 @@ if __name__ == "__main__":
     parser.add_argument("--hres", type=float, default=0.1,
                         help="H resolution step size (default: 0.1). E.g., 0.1 gives H=0.1,0.2,...,0.9; "
                              "0.02 gives H=0.02,0.04,...,0.98")
+    parser.add_argument("--parallel", action="store_true",
+                        help="Run H values in parallel using multiprocessing")
+    parser.add_argument("--workers", type=int, default=None,
+                        help="Number of parallel workers (default: cpu_count - 2)")
     args = parser.parse_args()
 
     model_type = args.model
@@ -338,8 +459,16 @@ if __name__ == "__main__":
     method = args.method
     strategy = args.strategy
     hres = args.hres
+    parallel = args.parallel
+    workers = args.workers
+
+    if workers is None:
+        workers = max(1, os.cpu_count() - 2)
+
     print(f"\n{'='*60}")
     print(f"Running model: {model_type}, n={n}, solver={solver}, method={method}, strategy={strategy}, hres={hres}")
+    if parallel:
+        print(f"PARALLEL mode: {workers} workers")
     print(f"{'='*60}\n")
 
     # --- Experiment settings ---
@@ -356,9 +485,14 @@ if __name__ == "__main__":
     if model_type == "fbm":
         val_markov, val_general = compute_value_vs_H_fbm(H_vec, n=n)
     else:  # mixed_fbm
-        val_markov, val_general = compute_value_vs_H_mixed_fbm(
-            H_vec, N=N, alpha=alpha, delta_t=delta_t, solver=solver, method=method, strategy=strategy
-        )
+        if parallel:
+            val_markov, val_general = compute_value_vs_H_mixed_fbm_parallel(
+                H_vec, N=N, alpha=alpha, delta_t=delta_t, method=method, strategy=strategy, workers=workers
+            )
+        else:
+            val_markov, val_general = compute_value_vs_H_mixed_fbm(
+                H_vec, N=N, alpha=alpha, delta_t=delta_t, solver=solver, method=method, strategy=strategy
+            )
 
     # --- Plot ---
     plt.figure(figsize=(8, 5))

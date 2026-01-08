@@ -1696,10 +1696,18 @@ def constrained_decomposition(
         cholesky_backend = auto_select_cholesky_backend(A, basis, verbose=verbose)
 
     used_method = method
-    if method == "newton" and auto_newton_cg and (m > max_m_for_full_hessian):
-        used_method = "newton-cg"
-        # Always print auto-switch message (important for user awareness)
-        print(f"{pfx}[Auto-switch] m={m} > {max_m_for_full_hessian} -> using newton-cg (matrix-free)")
+    if method == "newton" and auto_newton_cg:
+        # Auto-switch to newton-cg for efficiency:
+        # 1. Large m: explicit Hessian is O(m²) to form and O(m³) to solve
+        # 2. COO basis: implicit Hv is much cheaper than explicit Hessian O(m² × n²)
+        if m > max_m_for_full_hessian:
+            used_method = "newton-cg"
+            print(f"{pfx}[Auto-switch] m={m} > {max_m_for_full_hessian} -> using newton-cg (matrix-free)")
+        elif basis.is_sparse_coo() and m > 10:
+            # For COO bases, implicit Hv is O(r² × nnz) vs explicit Hessian O(m² × n²)
+            # Newton-CG is almost always faster for COO
+            used_method = "newton-cg"
+            print(f"{pfx}[Auto-switch] COO basis with m={m} -> using newton-cg (implicit Hv)")
 
     x = np.zeros(m, dtype=float)
 
