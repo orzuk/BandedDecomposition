@@ -359,6 +359,90 @@ def spd_mixed_fbm(N: int, H: float = 0.75, alpha: float = 1.0, delta_t: float = 
     return Sigma
 
 
+def spd_sum_fbm(n: int, H: float = 0.75, alpha: float = 1.0) -> np.ndarray:
+    """
+    Sum of BM and fBM covariance matrix (increments).
+
+    Models observing the sum process: X_i = W_i - W_{i-1} + alpha * (B^H_i - B^H_{i-1})
+    where W is standard BM and B^H is fBM with Hurst parameter H.
+
+    The covariance matrix Gamma is n x n with entries:
+      Gamma_ij = (alpha^2/n) * delta_ij + (alpha^2 / (2 * n^{2H})) * (|i-j+1|^{2H} + |i-j-1|^{2H} - 2|i-j|^{2H})
+
+    where delta_ij is Kronecker delta.
+
+    Parameters
+    ----------
+    n : int
+        Number of time steps / matrix size.
+    H : float, default 0.75
+        Hurst parameter in (0,1). For H > 3/4, arbitrage-free.
+    alpha : float, default 1.0
+        Weight of the fractional component relative to BM.
+
+    Returns
+    -------
+    Gamma : np.ndarray
+        The n x n covariance matrix (SPD).
+
+    Notes
+    -----
+    This is simpler than spd_mixed_fbm which has a 2N x 2N interleaved structure.
+    Here we only observe the sum, not the BM separately.
+    """
+    Gamma = np.zeros((n, n), dtype=float)
+
+    # fBM increment covariance factor: alpha^2 / (2 * n^{2H})
+    factor = (alpha ** 2) / (2.0 * (n ** (2.0 * H)))
+
+    for i in range(n):
+        for j in range(n):
+            diff = i - j
+            # fBM increment covariance: (|d+1|^{2H} + |d-1|^{2H} - 2|d|^{2H})
+            fbm_cov = (
+                np.abs(diff + 1) ** (2.0 * H)
+                + np.abs(diff - 1) ** (2.0 * H)
+                - 2.0 * np.abs(diff) ** (2.0 * H)
+            )
+            Gamma[i, j] = factor * fbm_cov
+
+    # Add BM variance on diagonal: (alpha^2/n) * delta_ij
+    for i in range(n):
+        Gamma[i, i] += (alpha ** 2) / n
+
+    return Gamma
+
+
+def invest_value_sum_fbm(Gamma) -> float:
+    """
+    Compute log investment value for sum-observation strategy.
+
+    The trader only observes the sum of BM and fBM, not both separately.
+
+    Value = prod_{i=1}^{n} [(Gamma^{-1})_ii]^{-1} / |Gamma|
+
+    log(Value) = -sum_{i=1}^{n} log((Gamma^{-1})_ii) - log|Gamma|
+
+    Parameters
+    ----------
+    Gamma : np.ndarray
+        The n x n covariance matrix from spd_sum_fbm.
+
+    Returns
+    -------
+    log_value : float
+        The log of the investment value.
+    """
+    Gamma_inv = np.linalg.inv(Gamma)
+    diag_Gamma_inv = np.diag(Gamma_inv)
+
+    # log(Value) = -sum(log(diag(Gamma^{-1}))) - log|Gamma|
+    _, log_det_Gamma = np.linalg.slogdet(Gamma)
+    log_value = -np.sum(np.log(diag_Gamma_inv)) - log_det_Gamma
+
+    return log_value
+
+
 def make_block_support_basis_offdiag(n: int, blocks, active_pairs=None, active_within=True):
     """
     Robust basis for a big G-invariant subspace S from an active block-support pattern.
