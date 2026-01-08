@@ -350,11 +350,12 @@ def _compute_single_H(args):
             # Keep processing other strategies, but log this error
             print(f"  [H={H:.4f}] Sum strategy FAILED: {e}")
 
-        # Rebuild basis from data (can't pickle SymBasis directly)
+        # Rebuild basis from pre-generated data
+        n_basis = 2 * N
         if run_markovian:
-            basis_markov = make_mixed_fbm_markovian_basis(N)
+            basis_markov = SymBasis(n=n_basis, coo_mats=basis_markov_data, name=f"mixed_fbm_markovian_N={N}")
         if run_full:
-            basis_full = make_mixed_fbm_full_info_basis(N)
+            basis_full = SymBasis(n=n_basis, coo_mats=basis_full_data, name=f"mixed_fbm_full_info_N={N}")
 
         # Build covariance matrix
         Sigma = spd_mixed_fbm(N, H=H, alpha=alpha, delta_t=delta_t)
@@ -419,10 +420,53 @@ def compute_value_vs_H_mixed_fbm_parallel(H_vec, N=50, alpha=1.0, delta_t=1.0,
     print(f"Mixed fBM (PARALLEL): N={N}, matrix size={n}x{n}")
     print(f"Strategy: {strategy}, Workers: {workers}")
     print(f"H values: {n_H} (from {H_vec[0]:.4f} to {H_vec[-1]:.4f})")
+
+    # --- Pre-generate basis data to avoid re-computing in every worker ---
+    print("Pre-generating basis data for parallel workers...")
+    t_basis_start = time.time()
+    
+    basis_markov_coo_data = None
+    if run_markovian:
+        markov_coo_mats = []
+        for l in range(1, N + 1):
+            j_col = 2 * l - 1
+            rows1, cols1, vals1 = [], [], []
+            for i in range(1, n + 1):
+                if i < j_col and (i % 2 == 1):
+                    rows1.extend([i - 1, j_col - 1])
+                    cols1.extend([j_col - 1, i - 1])
+                    vals1.extend([1.0, 1.0])
+            if rows1:
+                markov_coo_mats.append((np.array(rows1, dtype=int), np.array(cols1, dtype=int), np.array(vals1, dtype=float)))
+            
+            rows2, cols2, vals2 = [], [], []
+            for i in range(1, n + 1):
+                if i < j_col and (i % 2 == 0):
+                    rows2.extend([i - 1, j_col - 1])
+                    cols2.extend([j_col - 1, i - 1])
+                    vals2.extend([1.0, 1.0])
+            if rows2:
+                markov_coo_mats.append((np.array(rows2, dtype=int), np.array(cols2, dtype=int), np.array(vals2, dtype=float)))
+        basis_markov_coo_data = markov_coo_mats
+
+    basis_full_coo_data = None
+    if run_full:
+        full_coo_mats = []
+        for l in range(1, N + 1):
+            j_col = 2 * l - 1 - 1
+            for k in range(1, 2 * l - 1):
+                i_row = k - 1
+                rows = np.array([i_row, j_col], dtype=int)
+                cols = np.array([j_col, i_row], dtype=int)
+                vals = np.array([1.0, 1.0], dtype=float)
+                full_coo_mats.append((rows, cols, vals))
+        basis_full_coo_data = full_coo_mats
+        
+    print(f"... basis data generated in {time.time() - t_basis_start:.2f}s")
     print()  # blank line before results
 
     # Prepare arguments for workers (basis rebuilt in each worker)
-    args_list = [(H, N, alpha, delta_t, method, strategy, None, None) for H in H_vec]
+    args_list = [(H, N, alpha, delta_t, method, strategy, basis_markov_coo_data, basis_full_coo_data) for H in H_vec]
 
     total_start = time.time()
 
