@@ -347,22 +347,23 @@ def _compute_single_H(args):
 
         _, log_det_Sigma = np.linalg.slogdet(Sigma)
 
-        # Markovian strategy
+        # Markovian strategy (use newton-cg directly to avoid auto-switch print in workers)
         if run_markovian:
             B_markov, C_markov, _, info_m = constrained_decomposition(
-                A=Lambda, basis=basis_markov, method=method,
-                tol=5e-8, max_iter=500, verbose=False, return_info=True  # tol=5e-8 avoids H=0.6 edge case
+                A=Lambda, basis=basis_markov, method="newton-cg",
+                tol=5e-8, max_iter=500, verbose=False, return_info=True,
+                auto_newton_cg=False  # already using newton-cg, skip auto-switch logic
             )
             _, log_det_B_markov = np.linalg.slogdet(B_markov)
             result["val_markovian"] = 0.5 * (log_det_Sigma - log_det_B_markov)
             result["iters_markov"] = info_m["iters"]
 
-        # Full-info strategy (primal only for parallel)
+        # Full-info strategy (use newton-cg directly to avoid auto-switch print in workers)
         if run_full:
             B_full, C_full, _, info_f = constrained_decomposition(
-                A=Lambda, basis=basis_full, method=method,
+                A=Lambda, basis=basis_full, method="newton-cg",
                 tol=1e-8, max_iter=500, verbose=False, return_info=True,
-                max_m_for_full_hessian=10000
+                auto_newton_cg=False  # already using newton-cg, skip auto-switch logic
             )
             _, log_det_B_full = np.linalg.slogdet(B_full)
             result["val_full_info"] = 0.5 * (log_det_Sigma - log_det_B_full)
@@ -396,32 +397,44 @@ def compute_value_vs_H_mixed_fbm_parallel(H_vec, N=50, alpha=1.0, delta_t=1.0,
     print(f"Mixed fBM (PARALLEL): N={N}, matrix size={n}x{n}")
     print(f"Strategy: {strategy}, Workers: {workers}")
     print(f"H values: {n_H} (from {H_vec[0]:.4f} to {H_vec[-1]:.4f})")
+    print()  # blank line before results
 
     # Prepare arguments for workers (basis rebuilt in each worker)
     args_list = [(H, N, alpha, delta_t, method, strategy, None, None) for H in H_vec]
 
     total_start = time.time()
 
-    # Run in parallel
-    with mp.Pool(processes=workers) as pool:
-        results = pool.map(_compute_single_H, args_list)
+    # Store results by H value for correct ordering at end
+    results_dict = {}
+    completed = 0
 
-    # Collect results
+    # Run in parallel with imap_unordered for streaming results
+    with mp.Pool(processes=workers) as pool:
+        for res in pool.imap_unordered(_compute_single_H, args_list):
+            completed += 1
+            results_dict[res["H"]] = res
+
+            # Print progress immediately as each H completes
+            if res["error"]:
+                print(f"  [{completed:3d}/{n_H}] H={res['H']:.4f}: ERROR - {res['error']}")
+            else:
+                info_str = []
+                if run_markovian:
+                    info_str.append(f"markov={res['val_markovian']:.6f} ({res['iters_markov']} it)")
+                if run_full:
+                    info_str.append(f"full={res['val_full_info']:.6f} ({res['iters_full']} it)")
+                print(f"  [{completed:3d}/{n_H}] H={res['H']:.4f}: {', '.join(info_str)} [{res['time']:.1f}s]", flush=True)
+
+    # Collect results in original H order
     val_markovian = np.zeros(n_H) if run_markovian else None
     val_full_info = np.zeros(n_H) if run_full else None
 
-    for i, res in enumerate(results):
-        if res["error"]:
-            print(f"  H={res['H']:.4f}: ERROR - {res['error']}")
-        else:
-            info_str = []
-            if run_markovian:
-                val_markovian[i] = res["val_markovian"]
-                info_str.append(f"markov={res['val_markovian']:.4f} ({res['iters_markov']} it)")
-            if run_full:
-                val_full_info[i] = res["val_full_info"]
-                info_str.append(f"full={res['val_full_info']:.4f} ({res['iters_full']} it)")
-            print(f"  H={res['H']:.4f}: {', '.join(info_str)} [{res['time']:.1f}s]")
+    for i, H in enumerate(H_vec):
+        res = results_dict[H]
+        if run_markovian:
+            val_markovian[i] = res["val_markovian"]
+        if run_full:
+            val_full_info[i] = res["val_full_info"]
 
     total_time = time.time() - total_start
     print(f"\n=== Total time: {total_time:.2f} seconds ({total_time/n_H:.2f} sec/H value) ===")
