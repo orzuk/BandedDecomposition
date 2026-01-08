@@ -327,6 +327,9 @@ if __name__ == "__main__":
                              "'newton-cg' (matrix-free), or 'quasi-newton' (BFGS)")
     parser.add_argument("--strategy", type=str, choices=["both", "markovian", "full"], default="both",
                         help="Which strategies to run: 'both', 'markovian' (fast, O(N)), or 'full' (slow, O(N²))")
+    parser.add_argument("--hres", type=float, default=0.1,
+                        help="H resolution step size (default: 0.1). E.g., 0.1 gives H=0.1,0.2,...,0.9; "
+                             "0.02 gives H=0.02,0.04,...,0.98")
     args = parser.parse_args()
 
     model_type = args.model
@@ -334,12 +337,13 @@ if __name__ == "__main__":
     solver = args.solver
     method = args.method
     strategy = args.strategy
+    hres = args.hres
     print(f"\n{'='*60}")
-    print(f"Running model: {model_type}, n={n}, solver={solver}, method={method}, strategy={strategy}")
+    print(f"Running model: {model_type}, n={n}, solver={solver}, method={method}, strategy={strategy}, hres={hres}")
     print(f"{'='*60}\n")
 
     # --- Experiment settings ---
-    H_vec = np.arange(0.1, 1.0, 0.1)  # 0.1 to 0.9 with step 0.1 (coarse for profiling)
+    H_vec = np.arange(hres, 1.0, hres)  # from hres to <1.0 with step hres
 
     if model_type == "fbm":
         pass  # n is used directly
