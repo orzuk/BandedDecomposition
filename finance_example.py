@@ -460,6 +460,13 @@ if __name__ == "__main__":
     parser.add_argument("--hres", type=float, default=0.1,
                         help="H resolution step size (default: 0.1). E.g., 0.1 gives H=0.1,0.2,...,0.9; "
                              "0.02 gives H=0.02,0.04,...,0.98")
+    parser.add_argument("--hmin", type=float, default=0.0,
+                        help="Minimum H value (default: 0.0). H range starts at max(hmin, hres).")
+    parser.add_argument("--hmax", type=float, default=1.0,
+                        help="Maximum H value exclusive (default: 1.0). H range ends before hmax.")
+    parser.add_argument("--alpha", type=float, default=1.0,
+                        help="Weight of fBM component in mixed index (default: 1.0). "
+                             "Higher alpha increases fBM influence vs BM.")
     parser.add_argument("--parallel", action="store_true",
                         help="Run H values in parallel using multiprocessing")
     parser.add_argument("--workers", type=int, default=None,
@@ -472,6 +479,9 @@ if __name__ == "__main__":
     method = args.method
     strategy = args.strategy
     hres = args.hres
+    hmin = args.hmin
+    hmax = args.hmax
+    alpha = args.alpha
     parallel = args.parallel
     workers = args.workers
 
@@ -479,19 +489,21 @@ if __name__ == "__main__":
         workers = max(1, os.cpu_count() - 2)
 
     print(f"\n{'='*60}")
-    print(f"Running model: {model_type}, n={n}, solver={solver}, method={method}, strategy={strategy}, hres={hres}")
+    print(f"Running model: {model_type}, n={n}, solver={solver}, method={method}, strategy={strategy}")
+    print(f"H range: [{hmin}, {hmax}) with step {hres}, alpha={alpha}")
     if parallel:
         print(f"PARALLEL mode: {workers} workers")
     print(f"{'='*60}\n")
 
     # --- Experiment settings ---
-    H_vec = np.arange(hres, 1.0, hres)  # from hres to <1.0 with step hres
+    # H range: from max(hmin, hres) to hmax (exclusive), with step hres
+    h_start = max(hmin, hres) if hmin == 0.0 else hmin
+    H_vec = np.arange(h_start, hmax, hres)
 
     if model_type == "fbm":
         pass  # n is used directly
     else:  # mixed_fbm
         N = n // 2  # Number of time steps (matrix is 2N x 2N)
-        alpha = 1.0
         delta_t = 1.0
 
     # --- Run ---
@@ -517,7 +529,9 @@ if __name__ == "__main__":
     plt.ylabel("log(Value)", fontsize=12)
     if model_type == "mixed_fbm":
         plt.title(f"Mixed fBM: Strategy value vs H (N={N}, α={alpha})", fontsize=13)
-        plt.axvline(x=0.75, color='gray', linestyle='--', alpha=0.5, label='H=3/4 (arbitrage-free boundary)')
+        # Only show H=3/4 line if it's in the plotted range
+        if H_vec[0] <= 0.75 <= H_vec[-1]:
+            plt.axvline(x=0.75, color='gray', linestyle='--', alpha=0.5, label='H=3/4 (arbitrage-free boundary)')
     else:
         plt.title(f"fBM: Strategy value vs H (n={n})", fontsize=13)
     plt.legend()
@@ -529,7 +543,10 @@ if __name__ == "__main__":
     fig_dir = here / "figs" / model_type
     fig_dir.mkdir(parents=True, exist_ok=True)
 
-    out_png = fig_dir / f"value_{model_type}_vs_H_n_{n}_{strategy}.png"
+    # Include H range and alpha in filename for uniqueness
+    h_range_str = f"H_{H_vec[0]:.2f}_{H_vec[-1]:.2f}"
+    alpha_str = f"a{alpha:.1f}" if alpha != 1.0 else ""
+    out_png = fig_dir / f"value_{model_type}_n_{n}_{h_range_str}{alpha_str}_{strategy}.png"
     plt.savefig(out_png, dpi=150)
     print(f"\nSaved value figure to: {out_png}")
 
