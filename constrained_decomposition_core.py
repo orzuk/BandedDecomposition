@@ -92,8 +92,8 @@ def spd_inverse(A):
     A = 0.5 * (A + A.T)
     L = np.linalg.cholesky(A)
     I = np.eye(A.shape[0])
-    Y = np.linalg.solve(L, I)
-    A_inv = np.linalg.solve(L.T, Y)
+    Y = sp_linalg.solve_triangular(L, I, lower=True)
+    A_inv = sp_linalg.solve_triangular(L.T, Y, lower=False)
     return 0.5 * (A_inv + A_inv.T)
 
 
@@ -441,9 +441,11 @@ def solve_chol_multi_rhs(L, RHS):
     """
     Solve (L L^T) X = RHS for X, given Cholesky factor L.
     RHS can be (n,) or (n,r).
+    Uses optimized triangular solves (BLAS trsv/trsm).
     """
-    Y = np.linalg.solve(L, RHS)
-    X = np.linalg.solve(L.T, Y)
+    # Use scipy's optimized triangular solve
+    Y = sp_linalg.solve_triangular(L, RHS, lower=True)
+    X = sp_linalg.solve_triangular(L.T, Y, lower=False)
     return X
 
 
@@ -542,29 +544,40 @@ class CholeskyBackend:
       - "dense": standard O(n³) Cholesky (default)
       - "banded": O(n·b²) banded Cholesky, requires bandwidth parameter
       - "tridiagonal": special case of banded with bandwidth=1
+      - "block_diagonal": O(n·b²) where b=block_size, for block-diagonal matrices
+      - "block_toeplitz": block Cholesky with BLAS3 organization
 
     Usage:
         backend = CholeskyBackend("banded", bandwidth=3)
+        backend = CholeskyBackend("block_diagonal", block_size=2)
         L = backend.factor(M)
         X = backend.solve(L, RHS)
     """
 
-    def __init__(self, structure="dense", bandwidth=None):
+    def __init__(self, structure="dense", bandwidth=None, block_size=None):
         """
         Parameters
         ----------
         structure : str
-            "dense", "banded", or "tridiagonal"
+            "dense", "banded", "tridiagonal", "block_diagonal", or "block_toeplitz"
         bandwidth : int, optional
             Required for "banded". For "tridiagonal", bandwidth=1 is used.
+        block_size : int, optional
+            Required for "block_diagonal" and "block_toeplitz".
         """
         self.structure = structure
+        self.block_size = block_size
+
         if structure == "tridiagonal":
             self.bandwidth = 1
         elif structure == "banded":
             if bandwidth is None:
                 raise ValueError("bandwidth required for banded structure")
             self.bandwidth = bandwidth
+        elif structure in ("block_diagonal", "block_toeplitz"):
+            if block_size is None:
+                raise ValueError(f"block_size required for {structure} structure")
+            self.bandwidth = None
         else:
             self.bandwidth = None
 
@@ -580,6 +593,12 @@ class CholeskyBackend:
         elif self.structure in ("banded", "tridiagonal"):
             Lb, bw = cholesky_banded(M, self.bandwidth)
             return ("banded", Lb, bw)
+        elif self.structure == "block_diagonal":
+            L_blocks = cholesky_block_diagonal(M, self.block_size)
+            return ("block_diagonal", L_blocks, self.block_size)
+        elif self.structure == "block_toeplitz":
+            L = cholesky_block(M, self.block_size)
+            return ("block_toeplitz", L, self.block_size)
         else:
             raise ValueError(f"Unknown structure: {self.structure}")
 
@@ -593,6 +612,13 @@ class CholeskyBackend:
         elif factor[0] == "banded":
             _, Lb, bw = factor
             return solve_chol_banded_multi_rhs(Lb, bw, RHS)
+        elif factor[0] == "block_diagonal":
+            _, L_blocks, block_size = factor
+            return solve_block_diagonal(L_blocks, RHS, block_size)
+        elif factor[0] == "block_toeplitz":
+            # Block-Toeplitz uses dense L, so same solve as dense
+            _, L, _ = factor
+            return solve_chol_multi_rhs(L, RHS)
         else:
             raise ValueError(f"Unknown factor type: {factor[0]}")
 
@@ -608,6 +634,13 @@ class CholeskyBackend:
             _, Lb, bw = factor
             # First row of Lb contains diagonal of L
             return 2.0 * np.sum(np.log(Lb[0, :]))
+        elif factor[0] == "block_diagonal":
+            _, L_blocks, _ = factor
+            return logdet_block_diagonal(L_blocks)
+        elif factor[0] == "block_toeplitz":
+            # Dense L, same as dense
+            _, L, _ = factor
+            return 2.0 * np.sum(np.log(np.diag(L)))
         else:
             raise ValueError(f"Unknown factor type: {factor[0]}")
 
@@ -699,13 +732,249 @@ def detect_matrix_structure(A, tol=1e-10):
     return result
 
 
+def is_block_diagonal(A, block_size, tol=1e-10):
+    """
+    Check if A is block-diagonal with given block size.
+
+    Returns True if all off-diagonal blocks are zero (within tolerance).
+    """
+    A = np.asarray(A)
+    n = A.shape[0]
+    if n % block_size != 0:
+        return False
+
+    n_blocks = n // block_size
+    b = block_size
+
+    for i in range(n_blocks):
+        for j in range(n_blocks):
+            if i != j:
+                block = A[i*b:(i+1)*b, j*b:(j+1)*b]
+                if np.max(np.abs(block)) > tol:
+                    return False
+    return True
+
+
+def is_block_toeplitz(A, block_size, tol=1e-10):
+    """
+    Check if A is block-Toeplitz with given block size.
+
+    Block-Toeplitz means A[i,j] (as blocks) depends only on (i-j).
+    Each block on a given diagonal should be identical.
+    """
+    A = np.asarray(A)
+    n = A.shape[0]
+    if n % block_size != 0:
+        return False
+
+    n_blocks = n // block_size
+    b = block_size
+
+    # For each diagonal, check all blocks are equal
+    for diag in range(-(n_blocks - 1), n_blocks):
+        # Get reference block for this diagonal
+        if diag >= 0:
+            ref_i, ref_j = 0, diag
+        else:
+            ref_i, ref_j = -diag, 0
+
+        ref_block = A[ref_i*b:(ref_i+1)*b, ref_j*b:(ref_j+1)*b]
+
+        # Check all blocks on this diagonal match the reference
+        for k in range(1, n_blocks - abs(diag)):
+            i = ref_i + k
+            j = ref_j + k
+            block = A[i*b:(i+1)*b, j*b:(j+1)*b]
+            if np.max(np.abs(block - ref_block)) > tol:
+                return False
+
+    return True
+
+
+def detect_block_size(A, tol=1e-10, max_block=16):
+    """
+    Try to detect natural block size for block-structured matrices.
+
+    Checks block sizes from 2 up to max_block, returns first match.
+
+    Returns:
+        (block_size, structure_type) or (None, None) if no block structure found.
+        structure_type is 'block_diagonal' or 'block_toeplitz'.
+    """
+    A = np.asarray(A)
+    n = A.shape[0]
+
+    # Try block sizes from 2 up to max_block
+    for b in range(2, min(max_block + 1, n // 2 + 1)):
+        if n % b != 0:
+            continue
+        # Check block-diagonal first (more restrictive)
+        if is_block_diagonal(A, b, tol):
+            return b, 'block_diagonal'
+        # Then check block-Toeplitz
+        if is_block_toeplitz(A, b, tol):
+            return b, 'block_toeplitz'
+
+    return None, None
+
+
+def cholesky_block_diagonal(A, block_size):
+    """
+    Cholesky factorization for block-diagonal matrix.
+
+    Cost: O(n_blocks * block_size³) = O(n * block_size²)
+    Much faster than dense O(n³) when block_size << n.
+
+    Returns:
+        List of Cholesky factors for each diagonal block.
+    """
+    n = A.shape[0]
+    n_blocks = n // block_size
+    b = block_size
+
+    L_blocks = []
+    for i in range(n_blocks):
+        block = A[i*b:(i+1)*b, i*b:(i+1)*b]
+        L_block = np.linalg.cholesky(block)
+        L_blocks.append(L_block)
+
+    return L_blocks
+
+
+def solve_block_diagonal(L_blocks, RHS, block_size):
+    """
+    Solve L L^T X = RHS for block-diagonal L.
+
+    Parameters:
+        L_blocks: list of Cholesky factors (one per diagonal block)
+        RHS: right-hand side, shape (n,) or (n, k)
+        block_size: size of each block
+
+    Returns:
+        X: solution with same shape as RHS
+    """
+    RHS = np.asarray(RHS)
+    if RHS.ndim == 1:
+        RHS = RHS.reshape(-1, 1)
+        squeeze = True
+    else:
+        squeeze = False
+
+    n, k = RHS.shape
+    n_blocks = n // block_size
+    b = block_size
+
+    # For 2x2 blocks, use explicit formulas to avoid scipy overhead
+    if b == 2:
+        X = np.zeros_like(RHS)
+        for i in range(n_blocks):
+            L = L_blocks[i]
+            l11, l21, l22 = L[0, 0], L[1, 0], L[1, 1]
+            bi = RHS[i*2:(i+1)*2, :]
+            # Solve L y = b
+            y0 = bi[0, :] / l11
+            y1 = (bi[1, :] - l21 * y0) / l22
+            # Solve L^T x = y
+            x1 = y1 / l22
+            x0 = (y0 - l21 * x1) / l11
+            X[i*2, :] = x0
+            X[i*2+1, :] = x1
+    else:
+        X = np.zeros_like(RHS)
+        for i in range(n_blocks):
+            bi = RHS[i*b:(i+1)*b, :]
+            Li = L_blocks[i]
+            # Solve Li Li^T xi = bi
+            yi = sp_linalg.solve_triangular(Li, bi, lower=True)
+            xi = sp_linalg.solve_triangular(Li.T, yi, lower=False)
+            X[i*b:(i+1)*b, :] = xi
+
+    if squeeze:
+        X = X.ravel()
+    return X
+
+
+def logdet_block_diagonal(L_blocks):
+    """
+    Log-determinant from block-diagonal Cholesky factors.
+    log|A| = 2 * sum of log(diag(L_i)) for each block.
+    """
+    # Vectorize: concatenate all diagonals
+    all_diags = np.concatenate([np.diag(L) for L in L_blocks])
+    return 2.0 * np.sum(np.log(all_diags))
+
+
+def cholesky_block(A, block_size):
+    """
+    Block Cholesky factorization.
+
+    Organizes computation into block operations for better cache utilization
+    and BLAS3 efficiency. Returns dense L matrix.
+
+    For block-Toeplitz matrices, this doesn't give asymptotic speedup over
+    dense Cholesky, but provides better memory access patterns.
+
+    Cost: Still O(n³) but with better constants due to BLAS3.
+
+    Parameters:
+        A: SPD matrix (n x n)
+        block_size: block size for organization
+
+    Returns:
+        L: lower triangular Cholesky factor (dense n x n)
+    """
+    A = np.asarray(A)
+    n = A.shape[0]
+    n_blocks = n // block_size
+    b = block_size
+
+    # Handle remainder if n not divisible by block_size
+    if n % block_size != 0:
+        # Fall back to dense for non-divisible case
+        return np.linalg.cholesky(A)
+
+    L = np.zeros((n, n), dtype=float)
+
+    for j in range(n_blocks):
+        j0, j1 = j * b, (j + 1) * b
+
+        # Compute diagonal block L[j,j]
+        # L[j,j] L[j,j]^T = A[j,j] - sum_{k<j} L[j,k] L[j,k]^T
+        Ajj = A[j0:j1, j0:j1].copy()
+        for k in range(j):
+            k0, k1 = k * b, (k + 1) * b
+            Ljk = L[j0:j1, k0:k1]
+            Ajj -= Ljk @ Ljk.T
+        L[j0:j1, j0:j1] = np.linalg.cholesky(Ajj)
+        Ljj = L[j0:j1, j0:j1]
+
+        # Compute off-diagonal blocks L[i,j] for i > j
+        for i in range(j + 1, n_blocks):
+            i0, i1 = i * b, (i + 1) * b
+
+            # L[i,j] = (A[i,j] - sum_{k<j} L[i,k] L[j,k]^T) @ L[j,j]^{-T}
+            Aij = A[i0:i1, j0:j1].copy()
+            for k in range(j):
+                k0, k1 = k * b, (k + 1) * b
+                Lik = L[i0:i1, k0:k1]
+                Ljk = L[j0:j1, k0:k1]
+                Aij -= Lik @ Ljk.T
+
+            # Solve Lij @ Ljj^T = Aij => Lij = Aij @ Ljj^{-T}
+            L[i0:i1, j0:j1] = sp_linalg.solve_triangular(
+                Ljj.T, Aij.T, lower=False
+            ).T
+
+    return L
+
+
 def auto_select_cholesky_backend(A, basis, verbose=False):
     """
     Automatically select the best Cholesky backend given A and basis.
 
     Checks:
-      1. Structure of A (banded, Toeplitz, etc.)
-      2. Whether basis matrices preserve the structure
+      1. Block structure (block-diagonal, block-Toeplitz)
+      2. Banded structure
       3. Cost-benefit of specialized vs dense Cholesky
 
     Returns:
@@ -718,7 +987,7 @@ def auto_select_cholesky_backend(A, basis, verbose=False):
     A = np.asarray(A)
     n = A.shape[0]
 
-    # Detect A's structure
+    # Detect A's structure (banded, Toeplitz, etc.)
     A_info = detect_matrix_structure(A)
     A_struct = A_info['structure']
     A_bw = A_info['bandwidth']
@@ -730,7 +999,34 @@ def auto_select_cholesky_backend(A, basis, verbose=False):
         print(f"[Auto-detect] A: structure={A_struct}, bandwidth={A_bw}, n={n}")
         print(f"[Auto-detect] Basis: m={basis.m}, max_bandwidth={basis_bw}")
 
-    # Check if banded optimization applies
+    # --- Check block structures first (more specialized) ---
+    block_size, block_struct = detect_block_size(A)
+
+    if block_struct == 'block_diagonal':
+        # Block-diagonal gives O(n * b²) vs O(n³) - huge speedup
+        if verbose:
+            n_blocks = n // block_size
+            dense_cost = n ** 3 / 3
+            block_cost = n_blocks * block_size ** 3
+            speedup = dense_cost / block_cost
+            print(f"[Auto-detect] Using BLOCK_DIAGONAL Cholesky (block_size={block_size}, "
+                  f"n_blocks={n_blocks}, ~{speedup:.0f}x speedup)")
+        return CholeskyBackend("block_diagonal", block_size=block_size)
+
+    if block_struct == 'block_toeplitz':
+        # Block-Toeplitz with BLAS3 organization
+        # For small blocks, the overhead may not be worth it
+        # For block_size >= 4, the BLAS3 benefits kick in
+        if block_size >= 4 or n >= 100:
+            if verbose:
+                print(f"[Auto-detect] Using BLOCK_TOEPLITZ Cholesky (block_size={block_size}, "
+                      f"better cache/BLAS3 organization)")
+            return CholeskyBackend("block_toeplitz", block_size=block_size)
+        elif verbose:
+            print(f"[Auto-detect] Detected block_toeplitz (block_size={block_size}) but "
+                  f"block too small for benefit, checking other structures...")
+
+    # --- Check banded structure ---
     # M = A - C(x) is banded iff both A and all Dk have bandwidth <= b
     if A_struct in ('diagonal', 'tridiagonal', 'banded') and basis_bw <= A_bw:
         effective_bw = max(A_bw, basis_bw)
@@ -1198,8 +1494,8 @@ def phi_grad_hess_spd(A, x, basis: SymBasis, order=1):
 
     # Compute B = M^{-1} via solves (more stable than np.linalg.inv)
     I = np.eye(n)
-    Y = np.linalg.solve(L, I)
-    B = np.linalg.solve(L.T, Y)
+    Y = sp_linalg.solve_triangular(L, I, lower=True)
+    B = sp_linalg.solve_triangular(L.T, Y, lower=False)
     B = 0.5 * (B + B.T)
 
     g = basis.trace_with(B)
@@ -1457,8 +1753,8 @@ def constrained_decomposition(
                 try:
                     H_damped = H + lam * np.eye(m)
                     Lh = np.linalg.cholesky(H_damped)
-                    y = np.linalg.solve(Lh, -g)
-                    d = np.linalg.solve(Lh.T, y)
+                    y = sp_linalg.solve_triangular(Lh, -g, lower=True)
+                    d = sp_linalg.solve_triangular(Lh.T, y, lower=False)
                     break
                 except np.linalg.LinAlgError:
                     lam = max(10.0 * lam, 1e-12)
@@ -1651,8 +1947,8 @@ def _phi_grad_hess_dual(A, y, basis_perp: SymBasis, order=1):
 
     # Binv via solves
     I = np.eye(n)
-    Y = np.linalg.solve(L, I)
-    Binv = np.linalg.solve(L.T, Y)
+    Y = sp_linalg.solve_triangular(L, I, lower=True)
+    Binv = sp_linalg.solve_triangular(L.T, Y, lower=False)
     Binv = 0.5 * (Binv + Binv.T)
 
     # grad: <A - Binv, E_i>
@@ -1903,8 +2199,8 @@ def constrained_decomposition_dual(
             try:
                 H_damped = H + lam * np.eye(p)
                 Lh = np.linalg.cholesky(H_damped)
-                ytmp = np.linalg.solve(Lh, -g)
-                d = np.linalg.solve(Lh.T, ytmp)
+                ytmp = sp_linalg.solve_triangular(Lh, -g, lower=True)
+                d = sp_linalg.solve_triangular(Lh.T, ytmp, lower=False)
                 break
             except np.linalg.LinAlgError:
                 lam = max(10.0 * lam, 1e-12)
