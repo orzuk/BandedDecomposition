@@ -376,7 +376,7 @@ def spd_mixed_fbm(N: int, H: float = 0.75, alpha: float = 1.0, delta_t: float = 
     return Sigma
 
 
-def spd_sum_fbm(n: int, H: float = 0.75, alpha: float = 1.0) -> np.ndarray:
+def spd_sum_fbm(n: int, H: float = 0.75, alpha: float = 1.0, delta_t: float = None) -> np.ndarray:
     """
     Sum of BM and fBM covariance matrix (increments).
 
@@ -384,9 +384,9 @@ def spd_sum_fbm(n: int, H: float = 0.75, alpha: float = 1.0) -> np.ndarray:
     where W is standard BM and B^H is fBM with Hurst parameter H, assumed independent.
 
     The covariance matrix Gamma is n x n with entries:
-      Gamma_ij = (1/n) * delta_ij + (alpha^2 / (2 * n^{2H})) * (|i-j+1|^{2H} + |i-j-1|^{2H} - 2|i-j|^{2H})
+      Gamma_ij = dt * delta_ij + (alpha^2 / 2^{1+2H}) * dt^{2H} * (|i-j+1|^{2H} + |i-j-1|^{2H} - 2|i-j|^{2H})
 
-    where delta_ij is Kronecker delta.
+    where delta_ij is Kronecker delta and dt is the time step.
 
     Parameters
     ----------
@@ -396,6 +396,8 @@ def spd_sum_fbm(n: int, H: float = 0.75, alpha: float = 1.0) -> np.ndarray:
         Hurst parameter in (0,1). For H > 3/4, arbitrage-free.
     alpha : float, default 1.0
         Weight of the fractional component relative to BM.
+    delta_t : float, optional
+        Time step size. If None, defaults to 1/n for consistency with spd_mixed_fbm.
 
     Returns
     -------
@@ -406,11 +408,15 @@ def spd_sum_fbm(n: int, H: float = 0.75, alpha: float = 1.0) -> np.ndarray:
     -----
     This is simpler than spd_mixed_fbm which has a 2N x 2N interleaved structure.
     Here we only observe the sum, not the BM separately.
+    Uses same scaling as spd_mixed_fbm for consistent comparison.
     """
+    if delta_t is None:
+        delta_t = 1.0 / n
+
     Gamma = np.zeros((n, n), dtype=float)
 
-    # fBM increment covariance factor: alpha^2 / (2 * n^{2H})
-    factor = (alpha ** 2) / (2.0 * (n ** (2.0 * H)))
+    # fBM increment covariance factor - SAME as spd_mixed_fbm
+    factor = (alpha ** 2) / (2 ** (1 + 2 * H)) * (delta_t ** (2 * H))
 
     for i in range(n):
         for j in range(n):
@@ -423,22 +429,26 @@ def spd_sum_fbm(n: int, H: float = 0.75, alpha: float = 1.0) -> np.ndarray:
             )
             Gamma[i, j] = factor * fbm_cov
 
-    # Add BM variance on diagonal: (1/n) * delta_ij
+    # Add BM variance on diagonal: delta_t * delta_ij (same as spd_mixed_fbm)
     for i in range(n):
-        Gamma[i, i] += 1 / n
+        Gamma[i, i] += delta_t
 
     return Gamma
 
 
 def invest_value_sum_fbm(Gamma) -> float:
     """
-    Compute log investment value for sum-observation strategy.
+    Compute log investment value for sum-observation strategy using decomposition.
 
-    The trader only observes the sum of BM and fBM, not both separately.
+    The trader only observes the sum of BM and fBM (one observation per time step).
+    This corresponds to a Markovian constraint on the N×N sum covariance matrix:
+    the optimal B is diagonal (no cross-time information in the strategy).
 
-    Value = prod_{i=1}^{n} [(Gamma^{-1})_ii]^{-1} / |Gamma|
+    We solve: Λ = B^{-1} + C with C having zero diagonal (B is diagonal).
+    For diagonal B, the optimal solution is B_ii = 1/Λ_ii.
 
-    log(Value) = -sum_{i=1}^{n} log((Gamma^{-1})_ii) - log|Gamma|
+    Value formula (same as mixed strategies):
+        log(Value) = 0.5 × (log|Γ| - log|B|)
 
     Parameters
     ----------
@@ -450,12 +460,17 @@ def invest_value_sum_fbm(Gamma) -> float:
     log_value : float
         The log of the investment value.
     """
-    Gamma_inv = np.linalg.inv(Gamma)
-    diag_Gamma_inv = np.diag(Gamma_inv)
+    n = Gamma.shape[0]
+    Lambda = np.linalg.inv(Gamma)
 
-    # log(Value) = -sum(log(diag(Gamma^{-1}))) - log|Gamma|
+    # Optimal diagonal B: B_ii = 1/Λ_ii (Markovian strategy on sum observations)
+    B_diag = np.diag(1.0 / np.diag(Lambda))
+
     _, log_det_Gamma = np.linalg.slogdet(Gamma)
-    log_value = np.sum(np.log(diag_Gamma_inv)) + log_det_Gamma
+    _, log_det_B = np.linalg.slogdet(B_diag)
+
+    # Same formula as decomposition strategies
+    log_value = 0.5 * (log_det_Gamma - log_det_B)
 
     return log_value
 

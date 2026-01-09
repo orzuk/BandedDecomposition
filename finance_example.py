@@ -148,17 +148,134 @@ def make_mixed_fbm_markovian_basis(N: int):
     return SymBasis(n=n, coo_mats=coo_mats, name=f"mixed_fbm_markovian_N={N}")
 
 
-def compute_value_vs_H_mixed_fbm(H_vec, N=50, alpha=1.0, delta_t=1.0, solver="primal", method="newton", strategy="both"):
+def invest_value_mixed_fbm(H, N, alpha, delta_t, strategy, method="newton", solver="primal",
+                           Sigma=None, Lambda=None, basis=None, basis_perp=None,
+                           tol=1e-8, max_iter=500, verbose=False):
+    """
+    Compute investment value for mixed fBM model with a given strategy.
+
+    This is the unified value computation function for all three strategies:
+      - "sum": Observes only the mixed index X (N observations, N×N matrix)
+      - "markovian": Observes both X and W with Markovian constraints (2N obs, 2N×2N matrix)
+      - "full": Observes both X and W with full information (2N obs, 2N×2N matrix)
+
+    Value formula: log(Value) = 0.5 × (log|Σ| - log|B|)
+
+    The only difference between strategies is how B is computed:
+      - "sum": B is diagonal with B_ii = 1/Λ_ii (closed-form solution)
+      - "markovian"/"full": B comes from constrained decomposition Λ = B^{-1} + C
+
+    Parameters
+    ----------
+    H : float
+        Hurst parameter.
+    N : int
+        Number of time steps.
+    alpha : float
+        Weight of fBM component.
+    delta_t : float
+        Time step size.
+    strategy : str
+        "sum", "markovian", or "full".
+    method : str
+        Optimization method for decomposition ("newton", "newton-cg", "quasi-newton").
+    solver : str
+        "primal" or "dual" (for full strategy only).
+    Sigma : np.ndarray, optional
+        Pre-computed covariance matrix. Built if not provided.
+    Lambda : np.ndarray, optional
+        Pre-computed precision matrix. Built if not provided.
+    basis : SymBasis, optional
+        Pre-computed basis for the strategy. Built if not provided.
+    basis_perp : SymBasis, optional
+        Pre-computed orthogonal complement basis (for dual solver).
+    tol : float
+        Convergence tolerance.
+    max_iter : int
+        Maximum iterations.
+    verbose : bool
+        Print solver progress.
+
+    Returns
+    -------
+    value : float
+        Log investment value.
+    info : dict
+        Additional info: {"iters": int, "time": float, "method": str, "error": str or None}
+    """
+    info = {"iters": 0, "time": 0.0, "method": strategy, "error": None}
+    t_start = time.time()
+
+    try:
+        # === Step 1: Build covariance matrix Sigma (N×N for sum, 2N×2N for others) ===
+        if Sigma is None:
+            if strategy == "sum":
+                Sigma = spd_sum_fbm(N, H=H, alpha=alpha, delta_t=delta_t)
+            else:
+                Sigma = spd_mixed_fbm(N, H=H, alpha=alpha, delta_t=delta_t)
+
+        if not is_spd(Sigma):
+            info["error"] = "Sigma not SPD"
+            return np.nan, info
+
+        # === Step 2: Compute precision matrix Lambda ===
+        if Lambda is None:
+            Lambda = spd_inverse(Sigma)
+
+        if not is_spd(Lambda):
+            info["error"] = "Lambda not SPD"
+            return np.nan, info
+
+        # === Step 3: Compute log|Σ| (shared across all strategies) ===
+        _, log_det_Sigma = np.linalg.slogdet(Sigma)
+
+        # === Step 4: Compute B (strategy-specific) ===
+        if strategy == "sum":
+            # Closed-form: optimal diagonal B has B_ii = 1/Λ_ii
+            B = np.diag(1.0 / np.diag(Lambda))
+            info["method"] = "diagonal B"
+        else:
+            # Decomposition: solve Λ = B^{-1} + C with C ⊥ S
+            if basis is None:
+                if strategy == "markovian":
+                    basis = make_mixed_fbm_markovian_basis(N)
+                elif strategy == "full":
+                    basis = make_mixed_fbm_full_info_basis(N)
+                else:
+                    raise ValueError(f"Unknown strategy: {strategy}")
+
+            if strategy == "full" and solver == "dual":
+                if basis_perp is None:
+                    basis_perp = make_orthogonal_complement_basis(basis)
+                B, _, _, _ = constrained_decomposition_dual(
+                    A=Lambda, basis=basis, basis_perp=basis_perp,
+                    tol=tol, max_iter=max_iter, verbose=verbose
+                )
+                info["iters"] = "?"
+                info["method"] = "dual"
+            else:
+                B, _, _, decomp_info = constrained_decomposition(
+                    A=Lambda, basis=basis, method=method,
+                    tol=tol, max_iter=max_iter, verbose=verbose, return_info=True
+                )
+                info["iters"] = decomp_info["iters"]
+                info["method"] = decomp_info.get("used_method", method)
+
+        # === Step 5: Compute log|B| and final value (shared formula) ===
+        _, log_det_B = np.linalg.slogdet(B)
+        value = 0.5 * (log_det_Sigma - log_det_B)
+
+    except Exception as e:
+        info["error"] = str(e)
+        value = np.nan
+
+    info["time"] = time.time() - t_start
+    return value, info
+
+
+def compute_value_vs_H_mixed_fbm(H_vec, N=50, alpha=1.0, delta_t=None, solver="primal", method="newton", strategy="both"):
     """
     Compute investment value vs Hurst parameter H for mixed fBM model.
-
-    For each H:
-      1. Build covariance matrix Σ = spd_mixed_fbm(N, H, alpha, delta_t)
-      2. Compute precision Λ = Σ^{-1}
-      3. For each strategy (Markovian, full-info):
-         - Build the constraint subspace S
-         - Decompose Λ = B^{-1} + C with B ⊥ S
-         - Value = -sqrt(|B|/|Σ|), log form: 0.5*(log|Σ| - log|B|)
 
     Parameters
     ----------
@@ -168,161 +285,97 @@ def compute_value_vs_H_mixed_fbm(H_vec, N=50, alpha=1.0, delta_t=1.0, solver="pr
         Number of time steps. Matrix size is 2N x 2N.
     alpha : float
         Weight of fBM component in mixed index.
-    delta_t : float
-        Time step size.
+    delta_t : float, optional
+        Time step size. Defaults to 1/N.
     solver : str
-        "primal" uses primal Newton (fast for small m, Markovian),
-                 raises max_m_for_full_hessian for full-info.
-        "dual" uses dual Newton for full-info (builds S⊥ explicitly).
-               Better when m is large but m⊥ = n(n+1)/2 - m is small.
+        "primal" or "dual" (for full strategy).
+    method : str
+        Optimization method ("newton", "newton-cg", "quasi-newton").
     strategy : str
-        "both" runs both Markovian and full-info strategies.
-        "markovian" runs only Markovian strategy (fast, O(N) basis).
-        "full" runs only full-info strategy (slow, O(N²) basis).
+        "both", "markovian", "full", or "sum".
 
     Returns
     -------
     val_markovian : np.ndarray or None
-        Log values for Markovian strategy (None if not computed).
     val_full_info : np.ndarray or None
-        Log values for full-information strategy (None if not computed).
     val_sum_fbm : np.ndarray
-        Log values for the sum strategy.
     """
+    if delta_t is None:
+        delta_t = 1.0 / N
+
     n_H = len(H_vec)
+    run_sum = True  # Always compute sum for comparison
     run_markovian = strategy in ("both", "markovian")
     run_full = strategy in ("both", "full")
 
+    val_sum_fbm = np.zeros(n_H)
     val_markovian = np.zeros(n_H) if run_markovian else None
     val_full_info = np.zeros(n_H) if run_full else None
-    val_sum_fbm = np.zeros(n_H)
 
     n = 2 * N
 
-    # Build bases as needed
+    # Pre-build bases for efficiency (reused across H values)
     basis_markov = make_mixed_fbm_markovian_basis(N) if run_markovian else None
     basis_full = make_mixed_fbm_full_info_basis(N) if run_full else None
+    basis_full_perp = None
 
-    print(f"Mixed fBM: N={N}, matrix size={n}x{n}")
+    print(f"Mixed fBM: N={N}, matrix size={n}x{n}, delta_t={delta_t:.6f}")
     print(f"Strategy: {strategy}")
 
     if run_markovian:
         print(f"Markovian basis dimension: {basis_markov.m}")
-
     if run_full:
-        sym_dim = n * (n + 1) // 2
-        m_full = basis_full.m
-        m_perp = sym_dim - m_full
-        print(f"Full-info basis dimension (primal m): {m_full}")
-        print(f"Full-info dual dimension (m⊥): {m_perp}")
-        print(f"Solver mode: {solver}")
-
-    # For dual solver, pre-build orthogonal complement basis (expensive but done once)
-    basis_full_perp = None
-    if run_full and solver == "dual":
-        print("Building orthogonal complement basis for full-info (this may take a moment)...")
-        t0 = time.time()
-        basis_full_perp = make_orthogonal_complement_basis(basis_full)
-        print(f"  Built S⊥ basis with dimension {basis_full_perp.m} in {time.time()-t0:.2f}s")
+        print(f"Full-info basis dimension: {basis_full.m}")
+        if solver == "dual":
+            print("Building orthogonal complement basis...")
+            t0 = time.time()
+            basis_full_perp = make_orthogonal_complement_basis(basis_full)
+            print(f"  Built S⊥ (dim={basis_full_perp.m}) in {time.time()-t0:.2f}s")
 
     total_start = time.time()
 
     for i, H in enumerate(H_vec):
         print(f"\n--- H = {H:.4f} ({i+1}/{n_H}) ---")
 
-        # --- Sum strategy ---
-        try:
-            t_sum = time.time()
-            Gamma_sum = spd_sum_fbm(N, H=H, alpha=alpha)  # Here take only half
-            val_sum_fbm[i] = invest_value_sum_fbm(Gamma_sum)
-            t_sum = time.time() - t_sum
-            print(f"  Sum strategy: log(value) = {val_sum_fbm[i]:.6f} ({t_sum:.2f}s)")
-        except Exception as e:
-            print(f"  Sum strategy FAILED: {e}")
-            val_sum_fbm[i] = np.nan
-
-        # Build covariance matrix 2N*2N
-        delta_t = 1/N  # New! must be the same delta t for both!
+        # Build shared Sigma/Lambda for markovian/full (sum builds its own)
         Sigma = spd_mixed_fbm(N, H=H, alpha=alpha, delta_t=delta_t)
-        if not is_spd(Sigma):
-            print(f"  WARNING: Sigma not SPD for H={H}")
-            if run_markovian:
-                val_markovian[i] = np.nan
-            if run_full:
-                val_full_info[i] = np.nan
-            continue
+        Lambda = spd_inverse(Sigma) if is_spd(Sigma) else None
 
-        # Precision matrix (what we decompose)
-        Lambda = spd_inverse(Sigma)
-        if not is_spd(Lambda):
-            print(f"  WARNING: Lambda not SPD for H={H}")
-            if run_markovian:
-                val_markovian[i] = np.nan
-            if run_full:
-                val_full_info[i] = np.nan
-            continue
+        # --- Sum strategy ---
+        val, info = invest_value_mixed_fbm(
+            H=H, N=N, alpha=alpha, delta_t=delta_t, strategy="sum"
+        )
+        val_sum_fbm[i] = val
+        if info["error"]:
+            print(f"  Sum: FAILED - {info['error']}")
+        else:
+            print(f"  Sum: {val:.6f} ({info['time']:.2f}s)")
 
-        _, log_det_Sigma = np.linalg.slogdet(Sigma)
-
-        # --- Markovian strategy (primal, m is small) ---
+        # --- Markovian strategy ---
         if run_markovian:
-            try:
-                t_markov = time.time()
-                B_markov, C_markov, _, info_m = constrained_decomposition(
-                    A=Lambda,
-                    basis=basis_markov,
-                    method=method,
-                    tol=5e-8,  # Slightly looser than 1e-8 to avoid numerical edge cases (e.g., H=0.6)
-                    max_iter=500,
-                    verbose=False,
-                    return_info=True,
-                )
-                t_markov = time.time() - t_markov
-                if i == 0:
-                    print(f"  [Markovian using: {info_m.get('used_method', 'unknown')}]")
-                _, log_det_B_markov = np.linalg.slogdet(B_markov)
-                val_markovian[i] = 0.5 * (log_det_Sigma - log_det_B_markov)
-                print(f"  Markovian: log(value) = {val_markovian[i]:.6f} ({t_markov:.2f}s, {info_m['iters']} iters)")
-            except Exception as e:
-                print(f"  Markovian FAILED: {e}")
-                val_markovian[i] = np.nan
+            val, info = invest_value_mixed_fbm(
+                H=H, N=N, alpha=alpha, delta_t=delta_t, strategy="markovian",
+                method=method, Sigma=Sigma, Lambda=Lambda, basis=basis_markov,
+                tol=5e-8
+            )
+            val_markovian[i] = val
+            if info["error"]:
+                print(f"  Markovian: FAILED - {info['error']}")
+            else:
+                print(f"  Markovian: {val:.6f} ({info['time']:.2f}s, {info['iters']} iters, {info['method']})")
 
-        # --- Full-information strategy ---
+        # --- Full strategy ---
         if run_full:
-            try:
-                t_full = time.time()
-                if solver == "dual":
-                    # Dual Newton: optimize over S⊥ directly
-                    B_full, C_full, _, _ = constrained_decomposition_dual(
-                        A=Lambda,
-                        basis=basis_full,
-                        basis_perp=basis_full_perp,
-                        tol=1e-8,
-                        max_iter=500,
-                        verbose=False
-                    )
-                    info = {"iters": "?", "used_method": "dual"}
-                else:
-                    # Primal with specified method (auto-switches to newton-cg for large m)
-                    B_full, C_full, _, info = constrained_decomposition(
-                        A=Lambda,
-                        basis=basis_full,
-                        method=method,
-                        tol=1e-8,
-                        max_iter=500,
-                        verbose=False,
-                        return_info=True,
-                    )
-                    if i == 0:  # Print method used on first H
-                        print(f"  [Full-info using: {info.get('used_method', 'unknown')}]")
-                t_full = time.time() - t_full
-
-                _, log_det_B_full = np.linalg.slogdet(B_full)
-                val_full_info[i] = 0.5 * (log_det_Sigma - log_det_B_full)
-                print(f"  Full-info: log(value) = {val_full_info[i]:.6f} ({t_full:.2f}s, {info['iters']} iters)")
-            except Exception as e:
-                print(f"  Full-info FAILED: {e}")
-                val_full_info[i] = np.nan
+            val, info = invest_value_mixed_fbm(
+                H=H, N=N, alpha=alpha, delta_t=delta_t, strategy="full",
+                method=method, solver=solver, Sigma=Sigma, Lambda=Lambda,
+                basis=basis_full, basis_perp=basis_full_perp
+            )
+            val_full_info[i] = val
+            if info["error"]:
+                print(f"  Full-info: FAILED - {info['error']}")
+            else:
+                print(f"  Full-info: {val:.6f} ({info['time']:.2f}s, {info['iters']} iters, {info['method']})")
 
     total_time = time.time() - total_start
     print(f"\n=== Total time: {total_time:.2f} seconds ({total_time/n_H:.2f} sec/H value) ===")
@@ -344,61 +397,45 @@ def _compute_single_H(args):
     t_start = time.time()
 
     try:
-        # Sum strategy
-        t_sum_start = time.time()
-        try:
-            Gamma_sum = spd_sum_fbm(N, H=H, alpha=alpha)
-            result["val_sum_fbm"] = invest_value_sum_fbm(Gamma_sum)
-        except Exception as e:
-            # Keep processing other strategies, but log this error
-            print(f"  [H={H:.4f}] Sum strategy FAILED: {e}")
-        result["time_sum"] = time.time() - t_sum_start
-
-        # Rebuild basis from pre-generated data
+        # Rebuild bases from pre-generated data
         n_basis = 2 * N
-        if run_markovian:
-            basis_markov = SymBasis(n=n_basis, coo_mats=basis_markov_data, name=f"mixed_fbm_markovian_N={N}")
-        if run_full:
-            basis_full = SymBasis(n=n_basis, coo_mats=basis_full_data, name=f"mixed_fbm_full_info_N={N}")
+        basis_markov = SymBasis(n=n_basis, coo_mats=basis_markov_data, name=f"mixed_fbm_markovian_N={N}") if run_markovian else None
+        basis_full = SymBasis(n=n_basis, coo_mats=basis_full_data, name=f"mixed_fbm_full_info_N={N}") if run_full else None
 
-        # Build covariance matrix
+        # Build shared Sigma/Lambda
         Sigma = spd_mixed_fbm(N, H=H, alpha=alpha, delta_t=delta_t)
-        if not is_spd(Sigma):
-            result["error"] = "Sigma not SPD"
-            return result
+        Lambda = spd_inverse(Sigma) if is_spd(Sigma) else None
 
-        Lambda = spd_inverse(Sigma)
-        if not is_spd(Lambda):
-            result["error"] = "Lambda not SPD"
-            return result
+        # Sum strategy
+        val, info = invest_value_mixed_fbm(H=H, N=N, alpha=alpha, delta_t=delta_t, strategy="sum")
+        result["val_sum_fbm"] = val
+        result["time_sum"] = info["time"]
+        if info["error"]:
+            print(f"  [H={H:.4f}] Sum FAILED: {info['error']}")
 
-        _, log_det_Sigma = np.linalg.slogdet(Sigma)
-
-        # Markovian strategy (use newton-cg directly to avoid auto-switch print in workers)
+        # Markovian strategy
         if run_markovian:
-            t_markov_start = time.time()
-            B_markov, C_markov, _, info_m = constrained_decomposition(
-                A=Lambda, basis=basis_markov, method="newton-cg",
-                tol=5e-8, max_iter=500, verbose=False, return_info=True,
-                auto_newton_cg=False  # already using newton-cg, skip auto-switch logic
+            val, info = invest_value_mixed_fbm(
+                H=H, N=N, alpha=alpha, delta_t=delta_t, strategy="markovian",
+                method="newton-cg", Sigma=Sigma, Lambda=Lambda, basis=basis_markov, tol=5e-8
             )
-            _, log_det_B_markov = np.linalg.slogdet(B_markov)
-            result["val_markovian"] = 0.5 * (log_det_Sigma - log_det_B_markov)
-            result["iters_markov"] = info_m["iters"]
-            result["time_markov"] = time.time() - t_markov_start
+            result["val_markovian"] = val
+            result["iters_markov"] = info["iters"]
+            result["time_markov"] = info["time"]
+            if info["error"]:
+                result["error"] = info["error"]
 
-        # Full-info strategy (use newton-cg directly to avoid auto-switch print in workers)
+        # Full-info strategy
         if run_full:
-            t_full_start = time.time()
-            B_full, C_full, _, info_f = constrained_decomposition(
-                A=Lambda, basis=basis_full, method="newton-cg",
-                tol=1e-8, max_iter=500, verbose=False, return_info=True,
-                auto_newton_cg=False  # already using newton-cg, skip auto-switch logic
+            val, info = invest_value_mixed_fbm(
+                H=H, N=N, alpha=alpha, delta_t=delta_t, strategy="full",
+                method="newton-cg", Sigma=Sigma, Lambda=Lambda, basis=basis_full
             )
-            _, log_det_B_full = np.linalg.slogdet(B_full)
-            result["val_full_info"] = 0.5 * (log_det_Sigma - log_det_B_full)
-            result["iters_full"] = info_f["iters"]
-            result["time_full"] = time.time() - t_full_start
+            result["val_full_info"] = val
+            result["iters_full"] = info["iters"]
+            result["time_full"] = info["time"]
+            if info["error"]:
+                result["error"] = info["error"]
 
     except Exception as e:
         result["error"] = str(e)
@@ -407,7 +444,7 @@ def _compute_single_H(args):
     return result
 
 
-def compute_value_vs_H_mixed_fbm_parallel(H_vec, N=50, alpha=1.0, delta_t=1.0,
+def compute_value_vs_H_mixed_fbm_parallel(H_vec, N=50, alpha=1.0, delta_t=None,
                                           method="newton", strategy="markovian", workers=None):
     """
     Parallel version of compute_value_vs_H_mixed_fbm.
@@ -417,6 +454,9 @@ def compute_value_vs_H_mixed_fbm_parallel(H_vec, N=50, alpha=1.0, delta_t=1.0,
     workers : int or None
         Number of worker processes. Default: cpu_count - 2
     """
+    if delta_t is None:
+        delta_t = 1.0 / N
+
     n_H = len(H_vec)
     run_markovian = strategy in ("both", "markovian")
     run_full = strategy in ("both", "full")
@@ -425,7 +465,7 @@ def compute_value_vs_H_mixed_fbm_parallel(H_vec, N=50, alpha=1.0, delta_t=1.0,
         workers = max(1, os.cpu_count() - 2)
 
     n = 2 * N
-    print(f"Mixed fBM (PARALLEL): N={N}, matrix size={n}x{n}")
+    print(f"Mixed fBM (PARALLEL): N={N}, matrix size={n}x{n}, delta_t={delta_t:.6f}")
     print(f"Strategy: {strategy}, Workers: {workers}")
     print(f"H values: {n_H} (from {H_vec[0]:.4f} to {H_vec[-1]:.4f})")
 
@@ -581,7 +621,7 @@ if __name__ == "__main__":
         pass  # n is used directly
     else:  # mixed_fbm
         N = n // 2  # Number of time steps (matrix is 2N x 2N)
-        delta_t = 1.0
+        delta_t = 1.0 / N  # Time step for consistent scaling between sum and mixed
 
     # --- Run ---
     if model_type == "fbm":
