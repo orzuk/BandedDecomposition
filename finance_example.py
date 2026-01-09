@@ -150,7 +150,7 @@ def make_mixed_fbm_markovian_basis(N: int):
 
 def invest_value_mixed_fbm(H, N, alpha, delta_t, strategy, method="newton", solver="primal",
                            Sigma=None, Lambda=None, basis=None, basis_perp=None,
-                           tol=1e-8, max_iter=500, verbose=False):
+                           tol=1e-8, max_iter=500, verbose=False, x_init=None):
     """
     Compute investment value for mixed fBM model with a given strategy.
 
@@ -203,7 +203,7 @@ def invest_value_mixed_fbm(H, N, alpha, delta_t, strategy, method="newton", solv
     info : dict
         Additional info: {"iters": int, "time": float, "method": str, "error": str or None}
     """
-    info = {"iters": 0, "time": 0.0, "method": strategy, "error": None}
+    info = {"iters": 0, "time": 0.0, "method": strategy, "error": None, "x": None}
     t_start = time.time()
 
     try:
@@ -254,12 +254,14 @@ def invest_value_mixed_fbm(H, N, alpha, delta_t, strategy, method="newton", solv
                 info["iters"] = "?"
                 info["method"] = "dual"
             else:
-                B, _, _, decomp_info = constrained_decomposition(
+                B, _, x, decomp_info = constrained_decomposition(
                     A=Lambda, basis=basis, method=method,
-                    tol=tol, max_iter=max_iter, verbose=verbose, return_info=True
+                    tol=tol, max_iter=max_iter, verbose=verbose, return_info=True,
+                    x_init=x_init
                 )
                 info["iters"] = decomp_info["iters"]
                 info["method"] = decomp_info.get("used_method", method)
+                info["x"] = x  # Return for warm starting next iteration
 
         # === Step 5: Compute log|B| and final value (shared formula) ===
         _, log_det_B = np.linalg.slogdet(B)
@@ -334,6 +336,10 @@ def compute_value_vs_H_mixed_fbm(H_vec, N=50, alpha=1.0, delta_t=None, solver="p
 
     total_start = time.time()
 
+    # Warm start: keep track of previous solutions
+    x_markov_prev = None
+    x_full_prev = None
+
     for i, H in enumerate(H_vec):
         print(f"\n--- H = {H:.4f} ({i+1}/{n_H}) ---")
 
@@ -356,9 +362,10 @@ def compute_value_vs_H_mixed_fbm(H_vec, N=50, alpha=1.0, delta_t=None, solver="p
             val, info = invest_value_mixed_fbm(
                 H=H, N=N, alpha=alpha, delta_t=delta_t, strategy="markovian",
                 method=method, Sigma=Sigma, Lambda=Lambda, basis=basis_markov,
-                tol=5e-8
+                tol=5e-8, x_init=x_markov_prev
             )
             val_markovian[i] = val
+            x_markov_prev = info.get("x")  # Update warm start for next H
             if info["error"]:
                 print(f"  Markovian: FAILED - {info['error']}")
             else:
@@ -369,9 +376,10 @@ def compute_value_vs_H_mixed_fbm(H_vec, N=50, alpha=1.0, delta_t=None, solver="p
             val, info = invest_value_mixed_fbm(
                 H=H, N=N, alpha=alpha, delta_t=delta_t, strategy="full",
                 method=method, solver=solver, Sigma=Sigma, Lambda=Lambda,
-                basis=basis_full, basis_perp=basis_full_perp
+                basis=basis_full, basis_perp=basis_full_perp, x_init=x_full_prev
             )
             val_full_info[i] = val
+            x_full_prev = info.get("x")  # Update warm start for next H
             if info["error"]:
                 print(f"  Full-info: FAILED - {info['error']}")
             else:
@@ -417,7 +425,7 @@ def _compute_single_H(args):
         if run_markovian:
             val, info = invest_value_mixed_fbm(
                 H=H, N=N, alpha=alpha, delta_t=delta_t, strategy="markovian",
-                method="newton-cg", Sigma=Sigma, Lambda=Lambda, basis=basis_markov, tol=5e-8
+                method="newton", Sigma=Sigma, Lambda=Lambda, basis=basis_markov, tol=1e-6
             )
             result["val_markovian"] = val
             result["iters_markov"] = info["iters"]
