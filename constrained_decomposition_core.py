@@ -1857,11 +1857,18 @@ def constrained_decomposition(
             break
 
         # -------------------------
-        # accept + reevaluate (implicit)
+        # accept + reevaluate
         # -------------------------
         x_prev = x
         x = x_try
-        phi, g, factor, C, M = phi_grad_spd_implicit_selected(A, x, basis, cholesky_backend=cholesky_backend)
+
+        if used_method == "newton":
+            # For Newton method, recompute full Hessian at each iteration
+            phi, g, H, B, C, M, L = phi_grad_hess_spd(A, x, basis, order=2)
+            factor = ("dense", L) if L is not None else None
+        else:
+            # For other methods, use implicit evaluation (cheaper)
+            phi, g, factor, C, M = phi_grad_spd_implicit_selected(A, x, basis, cholesky_backend=cholesky_backend)
 
         # BFGS update
         if used_method == "quasi-newton":
