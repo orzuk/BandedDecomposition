@@ -233,7 +233,7 @@ def compute_value_vs_H_mixed_fbm(H_vec, N=50, alpha=1.0, delta_t=1.0, solver="pr
         # --- Sum strategy ---
         try:
             t_sum = time.time()
-            Gamma_sum = spd_sum_fbm(N, H=H, alpha=alpha)
+            Gamma_sum = spd_sum_fbm(N, H=H, alpha=alpha)  # Here take only half
             val_sum_fbm[i] = invest_value_sum_fbm(Gamma_sum)
             t_sum = time.time() - t_sum
             print(f"  Sum strategy: log(value) = {val_sum_fbm[i]:.6f} ({t_sum:.2f}s)")
@@ -241,7 +241,8 @@ def compute_value_vs_H_mixed_fbm(H_vec, N=50, alpha=1.0, delta_t=1.0, solver="pr
             print(f"  Sum strategy FAILED: {e}")
             val_sum_fbm[i] = np.nan
 
-        # Build covariance matrix
+        # Build covariance matrix 2N*2N
+        delta_t = 1/N  # New! must be the same delta t for both!
         Sigma = spd_mixed_fbm(N, H=H, alpha=alpha, delta_t=delta_t)
         if not is_spd(Sigma):
             print(f"  WARNING: Sigma not SPD for H={H}")
