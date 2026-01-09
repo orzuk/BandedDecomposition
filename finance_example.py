@@ -337,18 +337,21 @@ def _compute_single_H(args):
     run_full = strategy in ("both", "full")
 
     result = {"H": H, "val_markovian": np.nan, "val_full_info": np.nan, "val_sum_fbm": np.nan,
-              "iters_markov": 0, "iters_full": 0, "time": 0, "error": None}
+              "iters_markov": 0, "iters_full": 0, "time": 0, "error": None,
+              "time_sum": 0, "time_markov": 0, "time_full": 0}
 
     t_start = time.time()
 
     try:
         # Sum strategy
+        t_sum_start = time.time()
         try:
             Gamma_sum = spd_sum_fbm(N, H=H, alpha=alpha)
             result["val_sum_fbm"] = invest_value_sum_fbm(Gamma_sum)
         except Exception as e:
             # Keep processing other strategies, but log this error
             print(f"  [H={H:.4f}] Sum strategy FAILED: {e}")
+        result["time_sum"] = time.time() - t_sum_start
 
         # Rebuild basis from pre-generated data
         n_basis = 2 * N
@@ -372,6 +375,7 @@ def _compute_single_H(args):
 
         # Markovian strategy (use newton-cg directly to avoid auto-switch print in workers)
         if run_markovian:
+            t_markov_start = time.time()
             B_markov, C_markov, _, info_m = constrained_decomposition(
                 A=Lambda, basis=basis_markov, method="newton-cg",
                 tol=5e-8, max_iter=500, verbose=False, return_info=True,
@@ -380,9 +384,11 @@ def _compute_single_H(args):
             _, log_det_B_markov = np.linalg.slogdet(B_markov)
             result["val_markovian"] = 0.5 * (log_det_Sigma - log_det_B_markov)
             result["iters_markov"] = info_m["iters"]
+            result["time_markov"] = time.time() - t_markov_start
 
         # Full-info strategy (use newton-cg directly to avoid auto-switch print in workers)
         if run_full:
+            t_full_start = time.time()
             B_full, C_full, _, info_f = constrained_decomposition(
                 A=Lambda, basis=basis_full, method="newton-cg",
                 tol=1e-8, max_iter=500, verbose=False, return_info=True,
@@ -391,6 +397,7 @@ def _compute_single_H(args):
             _, log_det_B_full = np.linalg.slogdet(B_full)
             result["val_full_info"] = 0.5 * (log_det_Sigma - log_det_B_full)
             result["iters_full"] = info_f["iters"]
+            result["time_full"] = time.time() - t_full_start
 
     except Exception as e:
         result["error"] = str(e)
@@ -485,12 +492,12 @@ def compute_value_vs_H_mixed_fbm_parallel(H_vec, N=50, alpha=1.0, delta_t=1.0,
                 print(f"  [{completed:3d}/{n_H}] H={res['H']:.4f}: ERROR - {res['error']}")
             else:
                 info_str = []
-                info_str.append(f"sum={res['val_sum_fbm']:.6f}")
+                info_str.append(f"sum={res['val_sum_fbm']:.6f} [{res['time_sum']:.1f}s]")
                 if run_markovian:
-                    info_str.append(f"markov={res['val_markovian']:.6f} ({res['iters_markov']} it)")
+                    info_str.append(f"markov={res['val_markovian']:.6f} ({res['iters_markov']} it) [{res['time_markov']:.1f}s]")
                 if run_full:
-                    info_str.append(f"full={res['val_full_info']:.6f} ({res['iters_full']} it)")
-                print(f"  [{completed:3d}/{n_H}] H={res['H']:.4f}: {', '.join(info_str)} [{res['time']:.1f}s]", flush=True)
+                    info_str.append(f"full={res['val_full_info']:.6f} ({res['iters_full']} it) [{res['time_full']:.1f}s]")
+                print(f"  [{completed:3d}/{n_H}] H={res['H']:.4f}: {', '.join(info_str)} [total={res['time']:.1f}s]", flush=True)
 
     # Collect results in original H order
     val_markovian = np.zeros(n_H) if run_markovian else None
