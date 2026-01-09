@@ -123,7 +123,7 @@ if __name__ == "__main__":
     # demo sizes
     parser.add_argument("--n1", type=int, default=40, help="n for demo1 (general A, small S, primal).")
     parser.add_argument("--n2", type=int, default=120, help="n for demo2 (dual on banded S^perp).")
-    parser.add_argument("--n3", type=int, default=200, help="n for demo3 (block-permutation group).")
+    parser.add_argument("--n3", type=int, default=50, help="n for demo3 (block-permutation group).")
     parser.add_argument("--n4", type=int, default=300, help="n for demo4/5 (banded A + banded S).")
 
     # parameters

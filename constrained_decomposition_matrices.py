@@ -234,14 +234,21 @@ def make_block_constant_spd(blocks,
                             diag_range=(4.0, 7.0),
                             within_range=(0.4, 1.0),
                             cross_range=(1.2, 2.4),
-                            diag_margin=0.5):
+                            diag_margin=0.5,
+                            spd_method="eigenvalue"):
     """
     Construct a symmetric block-constant matrix A with:
       - different diagonal levels per block
       - different within-block offdiag per block
       - different cross-block constants per pair (typically larger for visibility)
 
-    Then enforce strict diagonal dominance -> SPD.
+    Then enforce SPD using the specified method.
+
+    Parameters
+    ----------
+    spd_method : str
+        "eigenvalue" - shift eigenvalues to make min eigenvalue = diag_margin (preserves structure)
+        "diagonal_dominance" - strict diagonal dominance (obscures off-diagonal structure)
     """
     rng = np.random.default_rng(seed)
     n = sum(len(I) for I in blocks)
@@ -274,10 +281,20 @@ def make_block_constant_spd(blocks,
                 for j in Ib:
                     A[i, j] = A[j, i] = c[a, b]
 
-    # Make SPD by strict diagonal dominance (Gershgorin / sufficient for SPD)
-    for i in range(n):
-        off = np.sum(np.abs(A[i, :])) - abs(A[i, i])
-        A[i, i] = off + diag_margin + abs(A[i, i])
+    # Make SPD
+    if spd_method == "eigenvalue":
+        # Shift eigenvalues: A <- A + (diag_margin - lambda_min) * I
+        # This preserves the block structure visually
+        eigvals = np.linalg.eigvalsh(A)
+        lambda_min = eigvals[0]
+        shift = diag_margin - lambda_min
+        if shift > 0:
+            A = A + shift * np.eye(n)
+    else:  # diagonal_dominance
+        # Strict diagonal dominance (Gershgorin / sufficient for SPD)
+        for i in range(n):
+            off = np.sum(np.abs(A[i, :])) - abs(A[i, i])
+            A[i, i] = off + diag_margin + abs(A[i, i])
 
     return A, {"d": d, "u": u, "c": c}
 
@@ -487,29 +504,29 @@ def make_block_support_basis_offdiag(n: int, blocks, active_pairs=None, active_w
     if active_pairs is None:
         active_pairs = [(a, b) for a in range(k) for b in range(a + 1, k)]
 
-    mats = []
+    coo_mats = []
 
-    # within-block arbitrary offdiag
+    # within-block arbitrary offdiag (COO: each matrix has only 2 non-zeros)
     if active_within:
         for a in range(k):
             I = blocks[a]
             for ii in range(len(I)):
                 for jj in range(ii + 1, len(I)):
                     i, j = I[ii], I[jj]
-                    D = np.zeros((n, n), dtype=float)
-                    D[i, j] = 1.0
-                    D[j, i] = 1.0
-                    mats.append(D)
+                    rows = np.array([i, j], dtype=int)
+                    cols = np.array([j, i], dtype=int)
+                    vals = np.array([1.0, 1.0], dtype=float)
+                    coo_mats.append((rows, cols, vals))
 
-    # cross-block arbitrary
+    # cross-block arbitrary (COO: each matrix has only 2 non-zeros)
     for (a, b) in active_pairs:
         Ia, Ib = blocks[a], blocks[b]
         for i in Ia:
             for j in Ib:
-                D = np.zeros((n, n), dtype=float)
-                D[i, j] = 1.0
-                D[j, i] = 1.0
-                mats.append(D)
+                rows = np.array([i, j], dtype=int)
+                cols = np.array([j, i], dtype=int)
+                vals = np.array([1.0, 1.0], dtype=float)
+                coo_mats.append((rows, cols, vals))
 
-    return SymBasis(n=n, dense_mats=mats, name=f"block_support_offdiag_k={k}_m={len(mats)}")
+    return SymBasis(n=n, coo_mats=coo_mats, name=f"block_support_offdiag_k={k}_m={len(coo_mats)}")
 
