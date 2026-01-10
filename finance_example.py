@@ -9,6 +9,101 @@ import argparse
 import time
 import multiprocessing as mp
 import os
+import pandas as pd
+
+
+def get_results_filename(model_type, n, alpha, hmin, hmax, hres, strategy):
+    """Generate a unique filename for results based on parameters."""
+    here = Path(__file__).resolve().parent
+    results_dir = here / "results" / model_type
+    results_dir.mkdir(parents=True, exist_ok=True)
+
+    alpha_str = f"_a{alpha:.2f}" if alpha != 1.0 else ""
+    filename = f"results_{model_type}_n{n}_H{hmin:.2f}-{hmax:.2f}_step{hres:.3f}{alpha_str}_{strategy}.csv"
+    return results_dir / filename
+
+
+def save_results(filename, H_vec, val_markov, val_full, val_sum, params):
+    """
+    Save results to CSV with full parameter information.
+
+    Parameters
+    ----------
+    filename : Path
+        Output file path
+    H_vec : array
+        H values
+    val_markov : array or None
+        Markovian strategy values
+    val_full : array or None
+        Full-info strategy values
+    val_sum : array or None
+        Sum strategy values
+    params : dict
+        Parameters dict with keys: model, n, N, alpha, delta_t, hmin, hmax, hres, strategy
+    """
+    rows = []
+    for i, H in enumerate(H_vec):
+        row = {
+            'H': H,
+            'model': params['model'],
+            'n': params['n'],
+            'N': params.get('N', params['n']),
+            'alpha': params['alpha'],
+            'delta_t': params.get('delta_t', 1.0),
+            'hmin': params['hmin'],
+            'hmax': params['hmax'],
+            'hres': params['hres'],
+        }
+        if val_sum is not None:
+            row['value_sum'] = val_sum[i]
+        if val_markov is not None:
+            row['value_markovian'] = val_markov[i]
+        if val_full is not None:
+            row['value_full'] = val_full[i]
+        rows.append(row)
+
+    df = pd.DataFrame(rows)
+    df.to_csv(filename, index=False)
+    print(f"\nSaved results to: {filename}")
+    return df
+
+
+def load_results(filename):
+    """
+    Load results from CSV.
+
+    Returns
+    -------
+    H_vec : array
+    val_markov : array or None
+    val_full : array or None
+    val_sum : array or None
+    params : dict
+    """
+    df = pd.read_csv(filename)
+
+    H_vec = df['H'].values
+
+    val_sum = df['value_sum'].values if 'value_sum' in df.columns else None
+    val_markov = df['value_markovian'].values if 'value_markovian' in df.columns else None
+    val_full = df['value_full'].values if 'value_full' in df.columns else None
+
+    # Extract params from first row
+    params = {
+        'model': df['model'].iloc[0],
+        'n': int(df['n'].iloc[0]),
+        'N': int(df['N'].iloc[0]),
+        'alpha': df['alpha'].iloc[0],
+        'delta_t': df['delta_t'].iloc[0],
+        'hmin': df['hmin'].iloc[0],
+        'hmax': df['hmax'].iloc[0],
+        'hres': df['hres'].iloc[0],
+    }
+
+    print(f"Loaded {len(H_vec)} results from: {filename}")
+    return H_vec, val_markov, val_full, val_sum, params
+
 
 # Computing value
 # Markovian strategy:
@@ -596,6 +691,10 @@ if __name__ == "__main__":
                         help="Run H values in parallel using multiprocessing")
     parser.add_argument("--workers", type=int, default=None,
                         help="Number of parallel workers (default: cpu_count - 2)")
+    parser.add_argument("--force-rerun", action="store_true",
+                        help="Force recomputation even if cached results exist")
+    parser.add_argument("--plot-only", action="store_true",
+                        help="Only plot from cached results, don't run computation")
     args = parser.parse_args()
 
     model_type = args.model
@@ -609,16 +708,11 @@ if __name__ == "__main__":
     alpha = args.alpha
     parallel = args.parallel
     workers = args.workers
+    force_rerun = args.force_rerun
+    plot_only = args.plot_only
 
     if workers is None:
         workers = max(1, os.cpu_count() - 2)
-
-    print(f"\n{'='*60}")
-    print(f"Running model: {model_type}, n={n}, solver={solver}, method={method}, strategy={strategy}")
-    print(f"H range: [{hmin}, {hmax}) with step {hres}, alpha={alpha}")
-    if parallel:
-        print(f"PARALLEL mode: {workers} workers")
-    print(f"{'='*60}\n")
 
     # --- Experiment settings ---
     # H range: from max(hmin, hres) to hmax (exclusive), with step hres
@@ -626,24 +720,64 @@ if __name__ == "__main__":
     H_vec = np.arange(h_start, hmax, hres)
 
     if model_type == "fbm":
-        pass  # n is used directly
+        N = n
+        delta_t = 1.0
     else:  # mixed_fbm
         N = n // 2  # Number of time steps (matrix is 2N x 2N)
         delta_t = 1.0 / N  # Time step for consistent scaling between sum and mixed
 
-    # --- Run ---
-    if model_type == "fbm":
-        val_markov, val_general = compute_value_vs_H_fbm(H_vec, n=n)
-        val_sum = None
-    else:  # mixed_fbm
+    # --- Check for cached results ---
+    results_file = get_results_filename(model_type, n, alpha, hmin, hmax, hres, strategy)
+    use_cache = results_file.exists() and not force_rerun
+
+    if plot_only and not results_file.exists():
+        print(f"ERROR: --plot-only specified but no cached results found at:\n  {results_file}")
+        exit(1)
+
+    if use_cache:
+        print(f"\n{'='*60}")
+        print(f"Loading cached results from: {results_file}")
+        print(f"(Use --force-rerun to recompute)")
+        print(f"{'='*60}\n")
+
+        H_vec, val_markov, val_general, val_sum, params = load_results(results_file)
+        N = params['N']
+
+    else:
+        print(f"\n{'='*60}")
+        print(f"Running model: {model_type}, n={n}, solver={solver}, method={method}, strategy={strategy}")
+        print(f"H range: [{hmin}, {hmax}) with step {hres}, alpha={alpha}")
         if parallel:
-            val_markov, val_general, val_sum = compute_value_vs_H_mixed_fbm_parallel(
-                H_vec, N=N, alpha=alpha, delta_t=delta_t, method=method, strategy=strategy, workers=workers
-            )
-        else:
-            val_markov, val_general, val_sum = compute_value_vs_H_mixed_fbm(
-                H_vec, N=N, alpha=alpha, delta_t=delta_t, solver=solver, method=method, strategy=strategy
-            )
+            print(f"PARALLEL mode: {workers} workers")
+        print(f"{'='*60}\n")
+
+        # --- Run ---
+        if model_type == "fbm":
+            val_markov, val_general = compute_value_vs_H_fbm(H_vec, n=n)
+            val_sum = None
+        else:  # mixed_fbm
+            if parallel:
+                val_markov, val_general, val_sum = compute_value_vs_H_mixed_fbm_parallel(
+                    H_vec, N=N, alpha=alpha, delta_t=delta_t, method=method, strategy=strategy, workers=workers
+                )
+            else:
+                val_markov, val_general, val_sum = compute_value_vs_H_mixed_fbm(
+                    H_vec, N=N, alpha=alpha, delta_t=delta_t, solver=solver, method=method, strategy=strategy
+                )
+
+        # --- Save results ---
+        params = {
+            'model': model_type,
+            'n': n,
+            'N': N,
+            'alpha': alpha,
+            'delta_t': delta_t,
+            'hmin': hmin,
+            'hmax': hmax,
+            'hres': hres,
+            'strategy': strategy,
+        }
+        save_results(results_file, H_vec, val_markov, val_general, val_sum, params)
 
     # --- Plot ---
     plt.figure(figsize=(8, 5))
