@@ -695,6 +695,10 @@ if __name__ == "__main__":
                         help="Force recomputation even if cached results exist")
     parser.add_argument("--plot-only", action="store_true",
                         help="Only plot from cached results, don't run computation")
+    parser.add_argument("--plot-hmin", type=float, default=None,
+                        help="Minimum H for plotting (default: use hmin). Filters cached data for plotting.")
+    parser.add_argument("--plot-hmax", type=float, default=None,
+                        help="Maximum H for plotting (default: use hmax). Filters cached data for plotting.")
     args = parser.parse_args()
 
     model_type = args.model
@@ -710,6 +714,8 @@ if __name__ == "__main__":
     workers = args.workers
     force_rerun = args.force_rerun
     plot_only = args.plot_only
+    plot_hmin = args.plot_hmin
+    plot_hmax = args.plot_hmax
 
     if workers is None:
         workers = max(1, os.cpu_count() - 2)
@@ -779,20 +785,36 @@ if __name__ == "__main__":
         }
         save_results(results_file, H_vec, val_markov, val_general, val_sum, params)
 
+    # --- Filter data for plotting if plot range specified ---
+    p_hmin = plot_hmin if plot_hmin is not None else H_vec[0]
+    p_hmax = plot_hmax if plot_hmax is not None else H_vec[-1] + 1e-9  # inclusive
+    mask = (H_vec >= p_hmin) & (H_vec <= p_hmax)
+
+    if not np.any(mask):
+        print(f"WARNING: No data in plot range [{p_hmin}, {p_hmax}]. Available: [{H_vec[0]:.2f}, {H_vec[-1]:.2f}]")
+    else:
+        H_plot = H_vec[mask]
+        val_markov_plot = val_markov[mask] if val_markov is not None else None
+        val_general_plot = val_general[mask] if val_general is not None else None
+        val_sum_plot = val_sum[mask] if val_sum is not None else None
+
+        if plot_hmin is not None or plot_hmax is not None:
+            print(f"Plotting H range: [{H_plot[0]:.2f}, {H_plot[-1]:.2f}] ({len(H_plot)} points)")
+
     # --- Plot ---
     plt.figure(figsize=(8, 5))
-    if val_markov is not None:
-        plt.plot(H_vec, val_markov, 'b-o', label="Markovian strategy", markersize=4)
-    if val_general is not None:
-        plt.plot(H_vec, val_general, 'r-s', label="Full-information strategy", markersize=4)
-    if val_sum is not None:
-        plt.plot(H_vec, val_sum, 'g-^', label="Sum strategy (no decomp)", markersize=4)
+    if val_markov_plot is not None:
+        plt.plot(H_plot, val_markov_plot, 'b-o', label="Markovian strategy", markersize=4)
+    if val_general_plot is not None:
+        plt.plot(H_plot, val_general_plot, 'r-s', label="Full-information strategy", markersize=4)
+    if val_sum_plot is not None:
+        plt.plot(H_plot, val_sum_plot, 'g-^', label="Sum strategy (no decomp)", markersize=4)
     plt.xlabel("Hurst parameter H", fontsize=12)
     plt.ylabel("log(Value)", fontsize=12)
     if model_type == "mixed_fbm":
         plt.title(f"Mixed fBM: Strategy value vs H (N={N}, α={alpha})", fontsize=13)
         # Only show H=3/4 line if it's in the plotted range
-        if H_vec[0] <= 0.75 <= H_vec[-1]:
+        if H_plot[0] <= 0.75 <= H_plot[-1]:
             plt.axvline(x=0.75, color='gray', linestyle='--', alpha=0.5, label='H=3/4 (arbitrage-free boundary)')
     else:
         plt.title(f"fBM: Strategy value vs H (n={n})", fontsize=13)
@@ -806,7 +828,7 @@ if __name__ == "__main__":
     fig_dir.mkdir(parents=True, exist_ok=True)
 
     # Include H range and alpha in filename for uniqueness
-    h_range_str = f"H_{H_vec[0]:.2f}_{H_vec[-1]:.2f}"
+    h_range_str = f"H_{H_plot[0]:.2f}_{H_plot[-1]:.2f}"
     alpha_str = f"a{alpha:.1f}" if alpha != 1.0 else ""
     out_png = fig_dir / f"value_{model_type}_n_{n}_{h_range_str}{alpha_str}_{strategy}.png"
     plt.savefig(out_png, dpi=150)
