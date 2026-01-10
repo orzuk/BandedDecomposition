@@ -143,6 +143,27 @@ def make_banded_basis(n: int, b: int, include_diag: bool = True):
     return SymBasis(n, dense_mats=mats, name=f"banded(b={b}, diag={include_diag})")
 
 
+def make_banded_basis_coo(n: int, b: int, include_diag: bool = True):
+    """
+    Sparse COO basis for symmetric banded matrices with half-bandwidth b.
+    Each basis matrix has 1 (diag) or 2 (offdiag) non-zeros.
+    """
+    coo_mats = []
+    if include_diag:
+        for i in range(n):
+            rows = np.array([i], dtype=int)
+            cols = np.array([i], dtype=int)
+            vals = np.array([1.0], dtype=float)
+            coo_mats.append((rows, cols, vals))
+    for k in range(1, b + 1):
+        for i in range(n - k):
+            j = i + k
+            rows = np.array([i, j], dtype=int)
+            cols = np.array([j, i], dtype=int)
+            vals = np.array([1.0, 1.0], dtype=float)
+            coo_mats.append((rows, cols, vals))
+    return SymBasis(n=n, coo_mats=coo_mats, name=f"banded_coo(b={b}, diag={include_diag})")
+
 def make_blocks(n: int, r: int):
     """
     Partition {0,...,n-1} into r contiguous blocks (sizes differ by at most 1).
@@ -544,4 +565,3 @@ def make_block_support_basis_offdiag(n: int, blocks, active_pairs=None, active_w
                 coo_mats.append((rows, cols, vals))
 
     return SymBasis(n=n, coo_mats=coo_mats, name=f"block_support_offdiag_k={k}_m={len(coo_mats)}")
-

@@ -201,7 +201,7 @@ if __name__ == "__main__":
     def build_demo45_once():
         if not _demo45_cache["built"]:
             A4 = make_banded_spd(args.n4, b=args.bandwidth4, seed=3, diag_boost=8.0)
-            basis4 = make_banded_basis(args.n4, b=args.bandwidth4, include_diag=False)
+            basis4 = make_banded_basis_coo(args.n4, b=args.bandwidth4, include_diag=False)
             _demo45_cache["A"] = A4
             _demo45_cache["basis"] = basis4
             _demo45_cache["built"] = True
@@ -255,14 +255,17 @@ if __name__ == "__main__":
         },
         {
             "name": "demo4_banded_A_newton",
-            "title": "Banded SPD A + banded S (same bandwidth)  (primal NEWTON)",
+            "title": "Banded SPD A + banded S (same bandwidth)  (primal NEWTON-CG)",
             "A_type": "banded_spd",
             "S_type": "banded constraints (same bandwidth)",
-            "solver": "primal-newton",
+            "solver": "primal-newton-cg",
             "build": lambda: (
                 build_demo45_once()[0],
                 build_demo45_once()[1],
-                {"method": "newton"},
+                {
+                    "method": "newton-cg",
+                    "cholesky_backend": CholeskyBackend("banded", bandwidth=args.bandwidth4),
+                },
             ),
             "solve": solve_primal,
             "plot_file": "demo4_banded_A_newton.png",
@@ -276,7 +279,10 @@ if __name__ == "__main__":
             "build": lambda: (
                 build_demo45_once()[0],
                 build_demo45_once()[1],
-                {"method": "quasi-newton"},
+                {
+                    "method": "quasi-newton",
+                    "cholesky_backend": CholeskyBackend("banded", bandwidth=args.bandwidth4),
+                },
             ),
             "solve": solve_primal,
             "plot_file": "demo5_banded_A_quasi.png",
