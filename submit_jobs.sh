@@ -18,7 +18,7 @@ CONDA_ENV="pymol-env"
 # Parameter arrays
 N_VALUES=(200 500 1000)
 ALPHA_VALUES=(0.2 1.0 5.0)
-MODELS=("mixed_fbm")  # Add "fbm" if you also want pure fBM
+MODELS=("mixed_fbm" "fbm")  # Both models
 
 # H range
 HMIN=0.01
