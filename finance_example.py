@@ -25,20 +25,20 @@ def append_result(H, val_sum, val_markov, val_full, params):
     filename = get_results_file()
 
     row = {
-        'H': H,
+        'H': round(H, 6),
         'model': params['model'],
         'n': params['n'],
         'N': params.get('N', params['n']),
         'alpha': params['alpha'],
-        'delta_t': params.get('delta_t', 1.0),
+        'delta_t': round(params.get('delta_t', 1.0), 6),
         'strategy': params['strategy'],
     }
     if val_sum is not None:
-        row['value_sum'] = val_sum
+        row['value_sum'] = round(val_sum, 6)
     if val_markov is not None:
-        row['value_markovian'] = val_markov
+        row['value_markovian'] = round(val_markov, 6)
     if val_full is not None:
-        row['value_full'] = val_full
+        row['value_full'] = round(val_full, 6)
 
     df_row = pd.DataFrame([row])
 
