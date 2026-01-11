@@ -12,110 +12,18 @@ import os
 import pandas as pd
 
 
-def get_results_filename(model_type, n, alpha, hmin, hmax, hres, strategy):
-    """Generate a unique filename for results based on parameters."""
+def get_results_file():
+    """Get path to the single master results CSV file."""
     here = Path(__file__).resolve().parent
-    results_dir = here / "results" / model_type
+    results_dir = here / "results"
     results_dir.mkdir(parents=True, exist_ok=True)
-
-    alpha_str = f"_a{alpha:.2f}" if alpha != 1.0 else ""
-    filename = f"results_{model_type}_n{n}_H{hmin:.2f}-{hmax:.2f}_step{hres:.3f}{alpha_str}_{strategy}.csv"
-    return results_dir / filename
+    return results_dir / "all_results.csv"
 
 
-def save_results(filename, H_vec, val_markov, val_full, val_sum, params):
-    """
-    Save results to CSV with full parameter information.
+def append_result(H, val_sum, val_markov, val_full, params):
+    """Append a single result row to the master CSV file."""
+    filename = get_results_file()
 
-    Parameters
-    ----------
-    filename : Path
-        Output file path
-    H_vec : array
-        H values
-    val_markov : array or None
-        Markovian strategy values
-    val_full : array or None
-        Full-info strategy values
-    val_sum : array or None
-        Sum strategy values
-    params : dict
-        Parameters dict with keys: model, n, N, alpha, delta_t, hmin, hmax, hres, strategy
-    """
-    rows = []
-    for i, H in enumerate(H_vec):
-        row = {
-            'H': H,
-            'model': params['model'],
-            'n': params['n'],
-            'N': params.get('N', params['n']),
-            'alpha': params['alpha'],
-            'delta_t': params.get('delta_t', 1.0),
-            'hmin': params['hmin'],
-            'hmax': params['hmax'],
-            'hres': params['hres'],
-        }
-        if val_sum is not None:
-            row['value_sum'] = val_sum[i]
-        if val_markov is not None:
-            row['value_markovian'] = val_markov[i]
-        if val_full is not None:
-            row['value_full'] = val_full[i]
-        rows.append(row)
-
-    df = pd.DataFrame(rows)
-    df.to_csv(filename, index=False)
-    print(f"\nSaved results to: {filename}")
-    return df
-
-
-def load_results(filename):
-    """
-    Load results from CSV.
-
-    Returns
-    -------
-    H_vec : array
-    val_markov : array or None
-    val_full : array or None
-    val_sum : array or None
-    params : dict
-    """
-    df = pd.read_csv(filename)
-
-    H_vec = df['H'].values
-
-    val_sum = df['value_sum'].values if 'value_sum' in df.columns else None
-    val_markov = df['value_markovian'].values if 'value_markovian' in df.columns else None
-    val_full = df['value_full'].values if 'value_full' in df.columns else None
-
-    # Extract params from first row
-    params = {
-        'model': df['model'].iloc[0],
-        'n': int(df['n'].iloc[0]),
-        'N': int(df['N'].iloc[0]),
-        'alpha': df['alpha'].iloc[0],
-        'delta_t': df['delta_t'].iloc[0],
-        'hmin': df['hmin'].iloc[0],
-        'hmax': df['hmax'].iloc[0],
-        'hres': df['hres'].iloc[0],
-    }
-
-    print(f"Loaded {len(H_vec)} results from: {filename}")
-    return H_vec, val_markov, val_full, val_sum, params
-
-
-def load_completed_H_values(filename):
-    """Load set of H values already computed (for incremental runs)."""
-    if not filename.exists():
-        return set()
-    df = pd.read_csv(filename)
-    # Round to avoid floating point issues
-    return set(round(h, 6) for h in df['H'].values)
-
-
-def append_result_to_csv(filename, H, val_sum, val_markov, val_full, params):
-    """Append a single result row to CSV (creates file if needed)."""
     row = {
         'H': H,
         'model': params['model'],
@@ -123,9 +31,7 @@ def append_result_to_csv(filename, H, val_sum, val_markov, val_full, params):
         'N': params.get('N', params['n']),
         'alpha': params['alpha'],
         'delta_t': params.get('delta_t', 1.0),
-        'hmin': params['hmin'],
-        'hmax': params['hmax'],
-        'hres': params['hres'],
+        'strategy': params['strategy'],
     }
     if val_sum is not None:
         row['value_sum'] = val_sum
@@ -140,6 +46,61 @@ def append_result_to_csv(filename, H, val_sum, val_markov, val_full, params):
         df_row.to_csv(filename, mode='a', header=False, index=False)
     else:
         df_row.to_csv(filename, index=False)
+
+
+def load_results_for_params(model, n, alpha, strategy):
+    """
+    Load results from master CSV filtered by parameters.
+
+    Returns
+    -------
+    H_vec : array
+    val_markov : array or None
+    val_full : array or None
+    val_sum : array or None
+    """
+    filename = get_results_file()
+    if not filename.exists():
+        return None, None, None, None
+
+    df = pd.read_csv(filename)
+
+    # Filter by parameters
+    mask = (
+        (df['model'] == model) &
+        (df['n'] == n) &
+        (np.isclose(df['alpha'], alpha)) &
+        (df['strategy'] == strategy)
+    )
+    df_filtered = df[mask].sort_values('H')
+
+    if len(df_filtered) == 0:
+        return None, None, None, None
+
+    H_vec = df_filtered['H'].values
+    val_sum = df_filtered['value_sum'].values if 'value_sum' in df_filtered.columns else None
+    val_markov = df_filtered['value_markovian'].values if 'value_markovian' in df_filtered.columns else None
+    val_full = df_filtered['value_full'].values if 'value_full' in df_filtered.columns else None
+
+    print(f"Loaded {len(H_vec)} results for model={model}, n={n}, alpha={alpha}, strategy={strategy}")
+    return H_vec, val_markov, val_full, val_sum
+
+
+def get_completed_H_values(model, n, alpha, strategy):
+    """Get set of H values already computed for given parameters."""
+    filename = get_results_file()
+    if not filename.exists():
+        return set()
+
+    df = pd.read_csv(filename)
+    mask = (
+        (df['model'] == model) &
+        (df['n'] == n) &
+        (np.isclose(df['alpha'], alpha)) &
+        (df['strategy'] == strategy)
+    )
+    # Round to avoid floating point issues
+    return set(round(h, 6) for h in df[mask]['H'].values)
 
 
 # Computing value
@@ -778,9 +739,6 @@ if __name__ == "__main__":
         N = n // 2  # Number of time steps (matrix is 2N x 2N)
         delta_t = 1.0 / N  # Time step for consistent scaling between sum and mixed
 
-    # --- Check for cached results ---
-    results_file = get_results_filename(model_type, n, alpha, hmin, hmax, hres, strategy)
-
     # Prepare params dict for saving
     params = {
         'model': model_type,
@@ -788,23 +746,22 @@ if __name__ == "__main__":
         'N': N,
         'alpha': alpha,
         'delta_t': delta_t,
-        'hmin': hmin,
-        'hmax': hmax,
-        'hres': hres,
         'strategy': strategy,
     }
 
+    results_file = get_results_file()
+
     if plot_only:
-        if not results_file.exists():
-            print(f"ERROR: --plot-only specified but no cached results found at:\n  {results_file}")
+        # --- Plot only mode: load from master CSV ---
+        H_vec, val_markov, val_general, val_sum = load_results_for_params(model_type, n, alpha, strategy)
+        if H_vec is None:
+            print(f"ERROR: --plot-only specified but no results found for model={model_type}, n={n}, alpha={alpha}, strategy={strategy}")
             exit(1)
         print(f"\n{'='*60}")
-        print(f"Loading cached results from: {results_file}")
+        print(f"Plot-only mode: loaded {len(H_vec)} results")
         print(f"{'='*60}\n")
-        H_vec, val_markov, val_general, val_sum, params = load_results(results_file)
-        N = params['N']
 
-    elif incremental:
+    elif incremental or not force_rerun:
         # --- Incremental mode: compute missing H values one by one ---
         print(f"\n{'='*60}")
         print(f"INCREMENTAL mode: {model_type}, n={n}, strategy={strategy}")
@@ -814,7 +771,7 @@ if __name__ == "__main__":
         print(f"{'='*60}\n")
 
         # Load already computed H values
-        completed_H = load_completed_H_values(results_file)
+        completed_H = get_completed_H_values(model_type, n, alpha, strategy)
         if completed_H:
             print(f"Found {len(completed_H)} already computed H values")
 
@@ -885,8 +842,8 @@ if __name__ == "__main__":
                 else:
                     print(f"  Full-info: {v_full:.6f} ({info['time']:.2f}s, {info['iters']} iters)")
 
-            # Save incrementally
-            append_result_to_csv(results_file, H, v_sum, v_markov, v_full, params)
+            # Save incrementally to master CSV
+            append_result(H, v_sum, v_markov, v_full, params)
             n_computed += 1
 
         total_time = time.time() - total_start
@@ -894,26 +851,15 @@ if __name__ == "__main__":
         print(f"=== Total time: {total_time:.2f}s ===")
 
         # Load all results for plotting
-        if results_file.exists():
-            H_vec, val_markov, val_general, val_sum, _ = load_results(results_file)
-        else:
+        H_vec, val_markov, val_general, val_sum = load_results_for_params(model_type, n, alpha, strategy)
+        if H_vec is None:
             print("No results to plot.")
             exit(0)
 
-    elif results_file.exists() and not force_rerun:
-        # --- Use cached results ---
-        print(f"\n{'='*60}")
-        print(f"Loading cached results from: {results_file}")
-        print(f"(Use --force-rerun to recompute)")
-        print(f"{'='*60}\n")
-
-        H_vec, val_markov, val_general, val_sum, params = load_results(results_file)
-        N = params['N']
-
     else:
-        # --- Full batch computation ---
+        # --- Full batch computation (force rerun) ---
         print(f"\n{'='*60}")
-        print(f"Running model: {model_type}, n={n}, solver={solver}, method={method}, strategy={strategy}")
+        print(f"FORCE RERUN: {model_type}, n={n}, solver={solver}, method={method}, strategy={strategy}")
         print(f"H range: [{hmin}, {hmax}) with step {hres}, alpha={alpha}")
         if parallel:
             print(f"PARALLEL mode: {workers} workers")
@@ -932,8 +878,12 @@ if __name__ == "__main__":
                     H_vec, N=N, alpha=alpha, delta_t=delta_t, solver=solver, method=method, strategy=strategy
                 )
 
-        # Save all results at once
-        save_results(results_file, H_vec, val_markov, val_general, val_sum, params)
+        # Save all results to master CSV
+        for i, H in enumerate(H_vec):
+            v_sum = val_sum[i] if val_sum is not None else None
+            v_markov = val_markov[i] if val_markov is not None else None
+            v_full = val_general[i] if val_general is not None else None
+            append_result(H, v_sum, v_markov, v_full, params)
 
     # --- Filter data for plotting if plot range specified ---
     p_hmin = plot_hmin if plot_hmin is not None else H_vec[0]
