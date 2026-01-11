@@ -10,6 +10,7 @@ import time
 import multiprocessing as mp
 import os
 import pandas as pd
+import fcntl  # For file locking on Linux
 
 
 def get_results_file():
@@ -21,8 +22,9 @@ def get_results_file():
 
 
 def append_result(H, val_sum, val_markov, val_full, params):
-    """Append a single result row to the master CSV file."""
+    """Append a single result row to the master CSV file (thread/process safe)."""
     filename = get_results_file()
+    lockfile = filename.with_suffix('.csv.lock')
 
     # Define all possible columns in a fixed order
     all_columns = ['H', 'model', 'n', 'N', 'alpha', 'delta_t', 'strategy',
@@ -43,10 +45,16 @@ def append_result(H, val_sum, val_markov, val_full, params):
 
     df_row = pd.DataFrame([row], columns=all_columns)
 
-    if filename.exists():
-        df_row.to_csv(filename, mode='a', header=False, index=False)
-    else:
-        df_row.to_csv(filename, index=False)
+    # Use file locking for safe concurrent writes
+    with open(lockfile, 'w') as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)  # Acquire exclusive lock
+        try:
+            if filename.exists():
+                df_row.to_csv(filename, mode='a', header=False, index=False)
+            else:
+                df_row.to_csv(filename, index=False)
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)  # Release lock
 
 
 def load_results_for_params(model, n, alpha, strategy):
@@ -88,12 +96,21 @@ def load_results_for_params(model, n, alpha, strategy):
 
 
 def get_completed_H_values(model, n, alpha, strategy):
-    """Get set of H values already computed for given parameters."""
+    """Get set of H values already computed for given parameters (thread/process safe)."""
     filename = get_results_file()
     if not filename.exists():
         return set()
 
-    df = pd.read_csv(filename)
+    lockfile = filename.with_suffix('.csv.lock')
+
+    # Use shared lock for reading (allows multiple readers, blocks during writes)
+    with open(lockfile, 'w') as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_SH)
+        try:
+            df = pd.read_csv(filename)
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
     mask = (
         (df['model'] == model) &
         (df['n'] == n) &
