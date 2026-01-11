@@ -24,6 +24,10 @@ def append_result(H, val_sum, val_markov, val_full, params):
     """Append a single result row to the master CSV file."""
     filename = get_results_file()
 
+    # Define all possible columns in a fixed order
+    all_columns = ['H', 'model', 'n', 'N', 'alpha', 'delta_t', 'strategy',
+                   'value_sum', 'value_markovian', 'value_full']
+
     row = {
         'H': round(H, 6),
         'model': params['model'],
@@ -32,15 +36,12 @@ def append_result(H, val_sum, val_markov, val_full, params):
         'alpha': params['alpha'],
         'delta_t': round(params.get('delta_t', 1.0), 6),
         'strategy': params['strategy'],
+        'value_sum': round(val_sum, 6) if val_sum is not None else '',
+        'value_markovian': round(val_markov, 6) if val_markov is not None else '',
+        'value_full': round(val_full, 6) if val_full is not None else '',
     }
-    if val_sum is not None:
-        row['value_sum'] = round(val_sum, 6)
-    if val_markov is not None:
-        row['value_markovian'] = round(val_markov, 6)
-    if val_full is not None:
-        row['value_full'] = round(val_full, 6)
 
-    df_row = pd.DataFrame([row])
+    df_row = pd.DataFrame([row], columns=all_columns)
 
     if filename.exists():
         df_row.to_csv(filename, mode='a', header=False, index=False)
@@ -239,6 +240,107 @@ def make_mixed_fbm_markovian_basis(N: int):
             coo_mats.append((np.array(rows2, dtype=int), np.array(cols2, dtype=int), np.array(vals2, dtype=float)))
 
     return SymBasis(n=n, coo_mats=coo_mats, name=f"mixed_fbm_markovian_N={N}")
+
+
+def invest_value_fbm(H, n, strategy, method="newton", Sigma=None, Lambda=None, basis=None,
+                     tol=1e-8, max_iter=500, verbose=False, x_init=None):
+    """
+    Compute investment value for pure fBM model with a given strategy.
+
+    Strategies:
+      - "markovian": Uses TridiagC_Basis (tridiagonal constraint)
+      - "full": General strategy, no constraint (closed-form)
+
+    Parameters
+    ----------
+    H : float
+        Hurst parameter.
+    n : int
+        Matrix dimension.
+    strategy : str
+        "markovian" or "full".
+    method : str
+        Optimization method for decomposition.
+    Sigma : np.ndarray, optional
+        Pre-computed covariance matrix. Built if not provided.
+    Lambda : np.ndarray, optional
+        Pre-computed precision matrix. Built if not provided.
+    basis : SymBasis, optional
+        Pre-computed basis for markovian strategy.
+    tol : float
+        Convergence tolerance.
+    max_iter : int
+        Maximum iterations.
+    verbose : bool
+        Print solver progress.
+    x_init : np.ndarray, optional
+        Initial guess for warm starting.
+
+    Returns
+    -------
+    value : float
+        Log investment value.
+    info : dict
+        Additional info: {"iters": int, "time": float, "method": str, "error": str or None, "x": array}
+    """
+    info = {"iters": 0, "time": 0.0, "method": strategy, "error": None, "x": None}
+    t_start = time.time()
+
+    try:
+        # === Step 1: Build covariance matrix Sigma ===
+        if Sigma is None:
+            Sigma = spd_fractional_BM(n, H=H, T=1.0)
+
+        if not is_spd(Sigma):
+            info["error"] = "Sigma not SPD"
+            return np.nan, info
+
+        # === Step 2: Compute precision matrix Lambda ===
+        if Lambda is None:
+            Lambda = spd_inverse(Sigma)
+
+        if not is_spd(Lambda):
+            info["error"] = "Lambda not SPD"
+            return np.nan, info
+
+        # === Step 3: Compute log|Σ| ===
+        _, log_det_Sigma = np.linalg.slogdet(Sigma)
+
+        # === Step 4: Compute B (strategy-specific) ===
+        if strategy == "full":
+            # General strategy: closed-form from differential covariance
+            A_diff = spd_fractional_BM(n, H=H, T=1.0, diff_flag=True)
+            value = invest_value_general(A_diff)
+            info["method"] = "closed-form"
+            info["time"] = time.time() - t_start
+            return value, info
+        elif strategy == "markovian":
+            # Markovian: constrained decomposition with tridiagonal basis
+            if basis is None:
+                basis = TridiagC_Basis(n)
+
+            B, _, x, decomp_info = constrained_decomposition(
+                A=Lambda, basis=basis, method=method,
+                tol=tol, max_iter=max_iter, verbose=verbose, return_info=True,
+                x_init=x_init
+            )
+            info["iters"] = decomp_info["iters"]
+            info["method"] = decomp_info.get("used_method", method)
+            info["x"] = x
+        else:
+            raise ValueError(f"Unknown strategy for fbm: {strategy}")
+
+        # === Step 5: Compute value ===
+        # For markovian: value = 0.5 * (log|C| - log|B|) where C = Sigma
+        _, log_det_B = np.linalg.slogdet(B)
+        value = 0.5 * (log_det_Sigma - log_det_B)
+
+    except Exception as e:
+        info["error"] = str(e)
+        value = np.nan
+
+    info["time"] = time.time() - t_start
+    return value, info
 
 
 def invest_value_mixed_fbm(H, N, alpha, delta_t, strategy, method="newton", solver="primal",
@@ -778,9 +880,13 @@ if __name__ == "__main__":
         run_markovian = strategy in ("both", "markovian")
         run_full = strategy in ("both", "full")
 
-        # Pre-build bases
-        basis_markov = make_mixed_fbm_markovian_basis(N) if run_markovian else None
-        basis_full = make_mixed_fbm_full_info_basis(N) if run_full else None
+        # Pre-build bases (model-specific)
+        if model_type == "fbm":
+            basis_markov = TridiagC_Basis(n) if run_markovian else None
+            basis_full = None  # Full strategy for fbm is closed-form, no basis needed
+        else:  # mixed_fbm
+            basis_markov = make_mixed_fbm_markovian_basis(N) if run_markovian else None
+            basis_full = make_mixed_fbm_full_info_basis(N) if run_full else None
 
         total_start = time.time()
         n_computed = 0
@@ -795,8 +901,12 @@ if __name__ == "__main__":
 
             print(f"\n--- H = {H:.4f} ({i+1}/{len(H_vec)}) ---")
 
-            # Build Sigma and check condition number
-            Sigma = spd_mixed_fbm(N, H=H, alpha=alpha, delta_t=delta_t)
+            # Build Sigma and check condition number (model-specific)
+            if model_type == "fbm":
+                Sigma = spd_fractional_BM(n, H=H, T=1.0)
+            else:
+                Sigma = spd_mixed_fbm(N, H=H, alpha=alpha, delta_t=delta_t)
+
             cond = np.linalg.cond(Sigma)
 
             if cond > max_cond:
@@ -810,37 +920,68 @@ if __name__ == "__main__":
                 n_skipped_cond += 1
                 continue
 
-            # Sum strategy
-            v_sum, info = invest_value_mixed_fbm(H=H, N=N, alpha=alpha, delta_t=delta_t, strategy="sum")
-            print(f"  Sum: {v_sum:.6f} ({info['time']:.2f}s)")
-
-            # Markovian strategy
+            v_sum = None
             v_markov = None
-            if run_markovian:
-                v_markov, info = invest_value_mixed_fbm(
-                    H=H, N=N, alpha=alpha, delta_t=delta_t, strategy="markovian",
-                    method=method, Sigma=Sigma, Lambda=Lambda, basis=basis_markov,
-                    tol=1e-6, verbose=False
-                )
-                if info["error"]:
-                    print(f"  Markovian: FAILED - {info['error']}")
-                    v_markov = np.nan
-                else:
-                    print(f"  Markovian: {v_markov:.6f} ({info['time']:.2f}s, {info['iters']} iters)")
-
-            # Full-info strategy
             v_full = None
-            if run_full:
-                v_full, info = invest_value_mixed_fbm(
-                    H=H, N=N, alpha=alpha, delta_t=delta_t, strategy="full",
-                    method=method, Sigma=Sigma, Lambda=Lambda, basis=basis_full,
-                    tol=1e-6, verbose=False
-                )
-                if info["error"]:
-                    print(f"  Full-info: FAILED - {info['error']}")
-                    v_full = np.nan
-                else:
-                    print(f"  Full-info: {v_full:.6f} ({info['time']:.2f}s, {info['iters']} iters)")
+
+            if model_type == "fbm":
+                # === Pure fBM: 2 strategies (markovian, full) ===
+                # Markovian strategy
+                if run_markovian:
+                    v_markov, info = invest_value_fbm(
+                        H=H, n=n, strategy="markovian", method=method,
+                        Sigma=Sigma, Lambda=Lambda, basis=basis_markov,
+                        tol=1e-6, verbose=False
+                    )
+                    if info["error"]:
+                        print(f"  Markovian: FAILED - {info['error']}")
+                        v_markov = np.nan
+                    else:
+                        print(f"  Markovian: {v_markov:.6f} ({info['time']:.2f}s, {info['iters']} iters)")
+
+                # Full strategy (closed-form for pure fbm)
+                if run_full:
+                    v_full, info = invest_value_fbm(
+                        H=H, n=n, strategy="full", method=method,
+                        Sigma=Sigma, Lambda=Lambda
+                    )
+                    if info["error"]:
+                        print(f"  Full: FAILED - {info['error']}")
+                        v_full = np.nan
+                    else:
+                        print(f"  Full: {v_full:.6f} ({info['time']:.2f}s, {info['method']})")
+
+            else:
+                # === Mixed fBM: 3 strategies (sum, markovian, full) ===
+                # Sum strategy (always computed for mixed_fbm)
+                v_sum, info = invest_value_mixed_fbm(H=H, N=N, alpha=alpha, delta_t=delta_t, strategy="sum")
+                print(f"  Sum: {v_sum:.6f} ({info['time']:.2f}s)")
+
+                # Markovian strategy
+                if run_markovian:
+                    v_markov, info = invest_value_mixed_fbm(
+                        H=H, N=N, alpha=alpha, delta_t=delta_t, strategy="markovian",
+                        method=method, Sigma=Sigma, Lambda=Lambda, basis=basis_markov,
+                        tol=1e-6, verbose=False
+                    )
+                    if info["error"]:
+                        print(f"  Markovian: FAILED - {info['error']}")
+                        v_markov = np.nan
+                    else:
+                        print(f"  Markovian: {v_markov:.6f} ({info['time']:.2f}s, {info['iters']} iters)")
+
+                # Full-info strategy
+                if run_full:
+                    v_full, info = invest_value_mixed_fbm(
+                        H=H, N=N, alpha=alpha, delta_t=delta_t, strategy="full",
+                        method=method, Sigma=Sigma, Lambda=Lambda, basis=basis_full,
+                        tol=1e-6, verbose=False
+                    )
+                    if info["error"]:
+                        print(f"  Full-info: FAILED - {info['error']}")
+                        v_full = np.nan
+                    else:
+                        print(f"  Full-info: {v_full:.6f} ({info['time']:.2f}s, {info['iters']} iters)")
 
             # Save incrementally to master CSV
             append_result(H, v_sum, v_markov, v_full, params)
