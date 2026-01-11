@@ -105,6 +105,43 @@ def load_results(filename):
     return H_vec, val_markov, val_full, val_sum, params
 
 
+def load_completed_H_values(filename):
+    """Load set of H values already computed (for incremental runs)."""
+    if not filename.exists():
+        return set()
+    df = pd.read_csv(filename)
+    # Round to avoid floating point issues
+    return set(round(h, 6) for h in df['H'].values)
+
+
+def append_result_to_csv(filename, H, val_sum, val_markov, val_full, params):
+    """Append a single result row to CSV (creates file if needed)."""
+    row = {
+        'H': H,
+        'model': params['model'],
+        'n': params['n'],
+        'N': params.get('N', params['n']),
+        'alpha': params['alpha'],
+        'delta_t': params.get('delta_t', 1.0),
+        'hmin': params['hmin'],
+        'hmax': params['hmax'],
+        'hres': params['hres'],
+    }
+    if val_sum is not None:
+        row['value_sum'] = val_sum
+    if val_markov is not None:
+        row['value_markovian'] = val_markov
+    if val_full is not None:
+        row['value_full'] = val_full
+
+    df_row = pd.DataFrame([row])
+
+    if filename.exists():
+        df_row.to_csv(filename, mode='a', header=False, index=False)
+    else:
+        df_row.to_csv(filename, index=False)
+
+
 # Computing value
 # Markovian strategy:
 def invest_value_markovian(B, C, log_flag = True):
@@ -699,6 +736,12 @@ if __name__ == "__main__":
                         help="Minimum H for plotting (default: use hmin). Filters cached data for plotting.")
     parser.add_argument("--plot-hmax", type=float, default=None,
                         help="Maximum H for plotting (default: use hmax). Filters cached data for plotting.")
+    parser.add_argument("--incremental", action="store_true",
+                        help="Save results incrementally after each H value. Resume from existing results.")
+    parser.add_argument("--max-cond", type=float, default=1e6,
+                        help="Maximum condition number for Sigma matrix. Skip H values exceeding this (default: 1e6).")
+    parser.add_argument("--cg-max-iter", type=int, default=500,
+                        help="Maximum CG iterations for newton-cg solver (default: 500).")
     args = parser.parse_args()
 
     model_type = args.model
@@ -716,6 +759,9 @@ if __name__ == "__main__":
     plot_only = args.plot_only
     plot_hmin = args.plot_hmin
     plot_hmax = args.plot_hmax
+    incremental = args.incremental
+    max_cond = args.max_cond
+    cg_max_iter = args.cg_max_iter
 
     if workers is None:
         workers = max(1, os.cpu_count() - 2)
@@ -734,13 +780,128 @@ if __name__ == "__main__":
 
     # --- Check for cached results ---
     results_file = get_results_filename(model_type, n, alpha, hmin, hmax, hres, strategy)
-    use_cache = results_file.exists() and not force_rerun
 
-    if plot_only and not results_file.exists():
-        print(f"ERROR: --plot-only specified but no cached results found at:\n  {results_file}")
-        exit(1)
+    # Prepare params dict for saving
+    params = {
+        'model': model_type,
+        'n': n,
+        'N': N,
+        'alpha': alpha,
+        'delta_t': delta_t,
+        'hmin': hmin,
+        'hmax': hmax,
+        'hres': hres,
+        'strategy': strategy,
+    }
 
-    if use_cache:
+    if plot_only:
+        if not results_file.exists():
+            print(f"ERROR: --plot-only specified but no cached results found at:\n  {results_file}")
+            exit(1)
+        print(f"\n{'='*60}")
+        print(f"Loading cached results from: {results_file}")
+        print(f"{'='*60}\n")
+        H_vec, val_markov, val_general, val_sum, params = load_results(results_file)
+        N = params['N']
+
+    elif incremental:
+        # --- Incremental mode: compute missing H values one by one ---
+        print(f"\n{'='*60}")
+        print(f"INCREMENTAL mode: {model_type}, n={n}, strategy={strategy}")
+        print(f"H range: [{hmin}, {hmax}) with step {hres}, alpha={alpha}")
+        print(f"Max condition number: {max_cond:.0e}, CG max iter: {cg_max_iter}")
+        print(f"Results file: {results_file}")
+        print(f"{'='*60}\n")
+
+        # Load already computed H values
+        completed_H = load_completed_H_values(results_file)
+        if completed_H:
+            print(f"Found {len(completed_H)} already computed H values")
+
+        run_markovian = strategy in ("both", "markovian")
+        run_full = strategy in ("both", "full")
+
+        # Pre-build bases
+        basis_markov = make_mixed_fbm_markovian_basis(N) if run_markovian else None
+        basis_full = make_mixed_fbm_full_info_basis(N) if run_full else None
+
+        total_start = time.time()
+        n_computed = 0
+        n_skipped_done = 0
+        n_skipped_cond = 0
+
+        for i, H in enumerate(H_vec):
+            H_rounded = round(H, 6)
+            if H_rounded in completed_H:
+                n_skipped_done += 1
+                continue
+
+            print(f"\n--- H = {H:.4f} ({i+1}/{len(H_vec)}) ---")
+
+            # Build Sigma and check condition number
+            Sigma = spd_mixed_fbm(N, H=H, alpha=alpha, delta_t=delta_t)
+            cond = np.linalg.cond(Sigma)
+
+            if cond > max_cond:
+                print(f"  SKIPPED: cond(Sigma)={cond:.2e} > {max_cond:.0e}")
+                n_skipped_cond += 1
+                continue
+
+            Lambda = spd_inverse(Sigma) if is_spd(Sigma) else None
+            if Lambda is None:
+                print(f"  SKIPPED: Sigma not SPD")
+                n_skipped_cond += 1
+                continue
+
+            # Sum strategy
+            v_sum, info = invest_value_mixed_fbm(H=H, N=N, alpha=alpha, delta_t=delta_t, strategy="sum")
+            print(f"  Sum: {v_sum:.6f} ({info['time']:.2f}s)")
+
+            # Markovian strategy
+            v_markov = None
+            if run_markovian:
+                v_markov, info = invest_value_mixed_fbm(
+                    H=H, N=N, alpha=alpha, delta_t=delta_t, strategy="markovian",
+                    method=method, Sigma=Sigma, Lambda=Lambda, basis=basis_markov,
+                    tol=1e-6, verbose=False
+                )
+                if info["error"]:
+                    print(f"  Markovian: FAILED - {info['error']}")
+                    v_markov = np.nan
+                else:
+                    print(f"  Markovian: {v_markov:.6f} ({info['time']:.2f}s, {info['iters']} iters)")
+
+            # Full-info strategy
+            v_full = None
+            if run_full:
+                v_full, info = invest_value_mixed_fbm(
+                    H=H, N=N, alpha=alpha, delta_t=delta_t, strategy="full",
+                    method=method, Sigma=Sigma, Lambda=Lambda, basis=basis_full,
+                    tol=1e-6, verbose=False
+                )
+                if info["error"]:
+                    print(f"  Full-info: FAILED - {info['error']}")
+                    v_full = np.nan
+                else:
+                    print(f"  Full-info: {v_full:.6f} ({info['time']:.2f}s, {info['iters']} iters)")
+
+            # Save incrementally
+            append_result_to_csv(results_file, H, v_sum, v_markov, v_full, params)
+            n_computed += 1
+
+        total_time = time.time() - total_start
+        print(f"\n=== Completed: {n_computed} computed, {n_skipped_done} already done, {n_skipped_cond} skipped (ill-conditioned) ===")
+        print(f"=== Total time: {total_time:.2f}s ===")
+
+        # Load all results for plotting
+        if results_file.exists():
+            H_vec, val_markov, val_general, val_sum, _ = load_results(results_file)
+        else:
+            print("No results to plot.")
+            exit(0)
+
+    elif results_file.exists() and not force_rerun:
+        # --- Use cached results ---
         print(f"\n{'='*60}")
         print(f"Loading cached results from: {results_file}")
         print(f"(Use --force-rerun to recompute)")
@@ -750,6 +911,7 @@ if __name__ == "__main__":
         N = params['N']
 
     else:
+        # --- Full batch computation ---
         print(f"\n{'='*60}")
         print(f"Running model: {model_type}, n={n}, solver={solver}, method={method}, strategy={strategy}")
         print(f"H range: [{hmin}, {hmax}) with step {hres}, alpha={alpha}")
@@ -757,7 +919,6 @@ if __name__ == "__main__":
             print(f"PARALLEL mode: {workers} workers")
         print(f"{'='*60}\n")
 
-        # --- Run ---
         if model_type == "fbm":
             val_markov, val_general = compute_value_vs_H_fbm(H_vec, n=n)
             val_sum = None
@@ -771,18 +932,7 @@ if __name__ == "__main__":
                     H_vec, N=N, alpha=alpha, delta_t=delta_t, solver=solver, method=method, strategy=strategy
                 )
 
-        # --- Save results ---
-        params = {
-            'model': model_type,
-            'n': n,
-            'N': N,
-            'alpha': alpha,
-            'delta_t': delta_t,
-            'hmin': hmin,
-            'hmax': hmax,
-            'hres': hres,
-            'strategy': strategy,
-        }
+        # Save all results at once
         save_results(results_file, H_vec, val_markov, val_general, val_sum, params)
 
     # --- Filter data for plotting if plot range specified ---
