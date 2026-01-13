@@ -1737,24 +1737,17 @@ def _solve_with_detailed_timing(Lambda, basis, tol=1e-8, max_iter=200, use_block
         # Flatten all indices for vectorized extraction
         all_upper_rows = []
         all_upper_cols = []
+        upper_groups = []  # Which basis element k each upper entry belongs to
         all_cross_rows = []
         all_cross_cols = []
-        upper_ptr = [0]  # Pointers for reduceat
-        cross_ptr = [0]
+        cross_groups = []  # Which basis element k each cross entry belongs to
 
         for k in range(m):
             rows, cols, vals = coo_data[k]
 
             # For each entry, determine which block it maps to
-            # BDvB is symmetric, so (i,j) and (j,i) contribute equally
-            # We compute BDvB[:, :N] only, so:
-            # - Entries with col < N go directly
-            # - Entries with col >= N use symmetry: BDvB[i, col] = BDvB[col, i] if col < N... wait
-
-            # Actually, entries with col >= N but row < N need BDvB[row, col].
-            # By symmetry BDvB[row, col] = BDvB[col, row].
-            # If col >= N, then BDvB[col, row] is in BDvB[N:, :N] = BDvB_cross.
-            # So BDvB[row, col] = BDvB_cross[col-N, row].
+            # BDvB is symmetric. We compute BDvB[:, :N] only.
+            # D12 entries (row < N, col >= N): use BDvB[row, col] = BDvB_cross[col-N, row]
 
             for i in range(len(rows)):
                 r, c = rows[i], cols[i]
@@ -1762,26 +1755,26 @@ def _solve_with_detailed_timing(Lambda, basis, tol=1e-8, max_iter=200, use_block
                     # D11: use BDvB_upper[r, c]
                     all_upper_rows.append(r)
                     all_upper_cols.append(c)
+                    upper_groups.append(k)
                 elif r >= N and c < N:
                     # D21: use BDvB_cross[r-N, c]
                     all_cross_rows.append(r - N)
                     all_cross_cols.append(c)
+                    cross_groups.append(k)
                 elif r < N and c >= N:
                     # D12: use symmetry, BDvB[r, c] = BDvB[c, r] = BDvB_cross[c-N, r]
                     all_cross_rows.append(c - N)
                     all_cross_cols.append(r)
+                    cross_groups.append(k)
                 # D22 entries (r >= N and c >= N) are skipped - shouldn't exist
-
-            upper_ptr.append(len(all_upper_rows))
-            cross_ptr.append(len(all_cross_rows))
 
         # Convert to numpy arrays
         all_upper_rows = np.array(all_upper_rows, dtype=int)
         all_upper_cols = np.array(all_upper_cols, dtype=int)
+        upper_groups = np.array(upper_groups, dtype=int)
         all_cross_rows = np.array(all_cross_rows, dtype=int)
         all_cross_cols = np.array(all_cross_cols, dtype=int)
-        upper_ptr = np.array(upper_ptr, dtype=int)
-        cross_ptr = np.array(cross_ptr, dtype=int)
+        cross_groups = np.array(cross_groups, dtype=int)
 
     def build_C(x_vec):
         """Build C matrix from coefficients."""
@@ -1861,24 +1854,17 @@ def _solve_with_detailed_timing(Lambda, basis, tol=1e-8, max_iter=200, use_block
         BDvB_upper = B11 @ Q11 + B12 @ Q21  # (BDvB)[0:N, 0:N]
         BDvB_cross = B21 @ Q11 + B22 @ Q21  # (BDvB)[N:2N, 0:N]
 
-        # Vectorized extraction
-        Hv = np.zeros(m, dtype=np.float64)
-
-        # Extract all values at once, then sum by segment
+        # Vectorized extraction using bincount for groupby-sum
+        # Extract all values at once, then sum by group (basis element)
         if len(all_upper_rows) > 0:
             upper_vals = BDvB_upper[all_upper_rows, all_upper_cols]
-            # Sum contributions for each basis element
-            for k in range(m):
-                start, end = upper_ptr[k], upper_ptr[k+1]
-                if end > start:
-                    Hv[k] += upper_vals[start:end].sum()
+            Hv = np.bincount(upper_groups, weights=upper_vals, minlength=m)
+        else:
+            Hv = np.zeros(m, dtype=np.float64)
 
         if len(all_cross_rows) > 0:
             cross_vals = BDvB_cross[all_cross_rows, all_cross_cols]
-            for k in range(m):
-                start, end = cross_ptr[k], cross_ptr[k+1]
-                if end > start:
-                    Hv[k] += cross_vals[start:end].sum()
+            Hv += np.bincount(cross_groups, weights=cross_vals, minlength=m)
 
         return Hv
 
