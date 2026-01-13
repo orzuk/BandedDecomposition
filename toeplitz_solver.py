@@ -1302,7 +1302,7 @@ class BlockedNewtonSolver:
 
         return B, C, x, info
 
-    def solve_lbfgs(self, tol=1e-8, max_iter=500, use_block_opt=True, history_size=10):
+    def solve_lbfgs(self, tol=1e-8, max_iter=500, use_block_opt=True, history_size=10, ftol=1e-14):
         """
         Solve using L-BFGS (quasi-Newton with limited memory).
 
@@ -1319,6 +1319,10 @@ class BlockedNewtonSolver:
             If True, use block-optimized B computation.
         history_size : int
             Number of gradient/step pairs to store (typically 5-20).
+        ftol : float
+            Function tolerance. Iterations stop when
+            (f^k - f^{k+1})/max{|f^k|,|f^{k+1}|,1} <= ftol.
+            Default 1e-14 for tight convergence.
 
         Returns
         -------
@@ -1428,6 +1432,7 @@ class BlockedNewtonSolver:
             options={
                 'maxiter': max_iter,
                 'gtol': tol,
+                'ftol': ftol,  # Tight function tolerance for precise convergence
                 'maxcor': history_size,  # History size
                 'disp': self.verbose,
             }
@@ -1885,7 +1890,7 @@ def benchmark_methods(N_values=None, H=0.6, alpha=1.0, strategy="markovian"):
     return results
 
 
-def _solve_lbfgs_general(Lambda, basis, tol=1e-8, max_iter=500, history_size=10):
+def _solve_lbfgs_general(Lambda, basis, tol=1e-8, max_iter=500, history_size=10, ftol=1e-14):
     """
     General L-BFGS solver for any basis (not Markovian-specific).
 
@@ -1982,6 +1987,7 @@ def _solve_lbfgs_general(Lambda, basis, tol=1e-8, max_iter=500, history_size=10)
         options={
             'maxiter': max_iter,
             'gtol': tol,
+            'ftol': ftol,
             'maxcor': history_size,
         }
     )
