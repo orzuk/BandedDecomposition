@@ -1088,9 +1088,9 @@ def compute_value_vs_H_mixed_fbm(H_vec, N=50, alpha=1.0, delta_t=None, solver="p
         Lambda = spd_inverse(Sigma) if is_spd(Sigma) else None
 
         # --- Sum strategy ---
+        # Note: Don't pass Sigma/Lambda - sum needs N×N matrix, not 2N×2N
         val, info = invest_value_mixed_fbm(
-            H=H, N=N, alpha=alpha, delta_t=delta_t, strategy="sum",
-            Sigma=Sigma, Lambda=Lambda
+            H=H, N=N, alpha=alpha, delta_t=delta_t, strategy="sum"
         )
         val_sum_fbm[i] = val
         if info["error"]:
@@ -1156,9 +1156,9 @@ def _compute_single_H(args):
         Lambda = spd_inverse(Sigma) if is_spd(Sigma) else None
 
         # Sum strategy
+        # Note: Don't pass Sigma/Lambda - sum needs N×N matrix, not 2N×2N
         val, info = invest_value_mixed_fbm(
-            H=H, N=N, alpha=alpha, delta_t=delta_t, strategy="sum",
-            Sigma=Sigma, Lambda=Lambda
+            H=H, N=N, alpha=alpha, delta_t=delta_t, strategy="sum"
         )
         result["val_sum_fbm"] = val
         result["time_sum"] = info["time"]
@@ -1589,9 +1589,9 @@ if __name__ == "__main__":
             else:
                 # === Mixed fBM: 3 strategies (sum, markovian, full) ===
                 # Sum strategy (always computed for mixed_fbm)
+                # Note: Don't pass Sigma/Lambda - sum needs N×N matrix, not 2N×2N
                 v_sum, info = invest_value_mixed_fbm(
-                    H=H, N=N, alpha=alpha, delta_t=delta_t, strategy="sum",
-                    Sigma=Sigma, Lambda=Lambda
+                    H=H, N=N, alpha=alpha, delta_t=delta_t, strategy="sum"
                 )
                 print(f"  Sum: {v_sum:.6f} ({info['time']:.2f}s)")
 
