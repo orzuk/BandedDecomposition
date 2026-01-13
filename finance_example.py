@@ -88,9 +88,10 @@ def load_results_for_params(model, n, alpha, strategy):
         return None, None, None, None
 
     H_vec = df_filtered['H'].values
-    val_sum = df_filtered['value_sum'].values if 'value_sum' in df_filtered.columns else None
-    val_markov = df_filtered['value_markovian'].values if 'value_markovian' in df_filtered.columns else None
-    val_full = df_filtered['value_full'].values if 'value_full' in df_filtered.columns else None
+    # Convert to numeric, treating empty strings as NaN
+    val_sum = pd.to_numeric(df_filtered['value_sum'], errors='coerce').values if 'value_sum' in df_filtered.columns else None
+    val_markov = pd.to_numeric(df_filtered['value_markovian'], errors='coerce').values if 'value_markovian' in df_filtered.columns else None
+    val_full = pd.to_numeric(df_filtered['value_full'], errors='coerce').values if 'value_full' in df_filtered.columns else None
 
     print(f"Loaded {len(H_vec)} results for model={model}, n={n}, alpha={alpha}, strategy={strategy}")
     return H_vec, val_markov, val_full, val_sum
