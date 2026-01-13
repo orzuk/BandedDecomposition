@@ -1302,6 +1302,167 @@ class BlockedNewtonSolver:
 
         return B, C, x, info
 
+    def solve_lbfgs(self, tol=1e-8, max_iter=500, use_block_opt=True, history_size=10):
+        """
+        Solve using L-BFGS (quasi-Newton with limited memory).
+
+        First-order method: only needs gradient, no Hessian-vector products.
+        More iterations than Newton-CG, but each iteration is much cheaper.
+
+        Parameters
+        ----------
+        tol : float
+            Convergence tolerance for gradient norm.
+        max_iter : int
+            Maximum iterations.
+        use_block_opt : bool
+            If True, use block-optimized B computation.
+        history_size : int
+            Number of gradient/step pairs to store (typically 5-20).
+
+        Returns
+        -------
+        B : array (2N, 2N)
+            Optimal B matrix.
+        C : array (2N, 2N)
+            Optimal C matrix.
+        x : array (m,)
+            Optimal coefficients.
+        info : dict
+            Convergence info including timing.
+        """
+        import time
+        from scipy.optimize import minimize
+
+        t_start = time.time()
+        t_B_compute = 0.0
+        t_gradient = 0.0
+        func_evals = 0
+        grad_evals = 0
+
+        # Choose B computation method
+        compute_B = self.compute_B_block_optimized if use_block_opt else self.compute_B_fast
+
+        # Cache for B to avoid recomputation when gradient is called right after function
+        cached_x = None
+        cached_B = None
+
+        def objective(x_vec):
+            """f(x) = -log det(Λ - C(x)) = log det(B)"""
+            nonlocal t_B_compute, func_evals, cached_x, cached_B
+
+            func_evals += 1
+            t0 = time.time()
+
+            try:
+                B, L_info = compute_B(x_vec)
+                cached_x = x_vec.copy()
+                cached_B = B
+            except np.linalg.LinAlgError:
+                # Matrix not SPD - return large value
+                cached_x = None
+                cached_B = None
+                t_B_compute += time.time() - t0
+                return 1e10
+
+            t_B_compute += time.time() - t0
+
+            # f(x) = log det(B) = -log det(M)
+            # From block Cholesky: log det(M) = log det(M11) + log det(S)
+            # = 2 * (sum log diag(L11) + sum log diag(L_S))
+            # The info dict stores sum log diag already
+            if 'log_det_M11' in L_info:
+                log_det_M = 2 * (L_info['log_det_M11'] + L_info['log_det_S'])
+                return -log_det_M  # log det(B) = -log det(M)
+            else:
+                # Fallback if full Cholesky was used
+                sign, logdet = np.linalg.slogdet(B)
+                if sign <= 0:
+                    return 1e10
+                return logdet
+
+        def gradient(x_vec):
+            """∇f_k = -tr(B D_k)"""
+            nonlocal t_gradient, grad_evals, t_B_compute, cached_x, cached_B
+
+            grad_evals += 1
+            t0 = time.time()
+
+            # Check if we can use cached B
+            if cached_x is not None and np.allclose(x_vec, cached_x):
+                B = cached_B
+            else:
+                # Need to compute B
+                t_b0 = time.time()
+                try:
+                    B, _ = compute_B(x_vec)
+                    cached_x = x_vec.copy()
+                    cached_B = B
+                except np.linalg.LinAlgError:
+                    t_B_compute += time.time() - t_b0
+                    t_gradient += time.time() - t0 - (time.time() - t_b0)
+                    return np.zeros(self.m)
+                t_B_compute += time.time() - t_b0
+
+            # g_k = tr(B D_k)
+            # f(x) = log det(B) = -log det(M)
+            # ∇f_k = tr(B D_k) = g_k
+            g = self.compute_gradient(B)
+            t_gradient += time.time() - t0
+
+            return g
+
+        # Initial point
+        x0 = np.zeros(self.m, dtype=np.float64)
+
+        if self.verbose:
+            print(f"BlockedNewtonSolver L-BFGS: N={self.N}, m={self.m}")
+            print(f"  Block B: {'ON' if use_block_opt else 'OFF'}, history={history_size}")
+
+        # Run L-BFGS-B
+        result = minimize(
+            objective,
+            x0,
+            method='L-BFGS-B',
+            jac=gradient,
+            options={
+                'maxiter': max_iter,
+                'gtol': tol,
+                'maxcor': history_size,  # History size
+                'disp': self.verbose,
+            }
+        )
+
+        x = result.x
+        t_total = time.time() - t_start
+
+        # Final B and C
+        B, _ = compute_B(x)
+        C = self.build_C(x)
+        g = self.compute_gradient(B)
+
+        info = {
+            'iters': result.nit,
+            'func_evals': func_evals,
+            'grad_evals': grad_evals,
+            'converged': result.success,
+            'final_max_g': np.max(np.abs(g)),
+            'time': t_total,
+            'timing': {
+                'B_compute': t_B_compute,
+                'gradient': t_gradient,
+            },
+            'use_block_opt': use_block_opt,
+            'method': 'L-BFGS',
+            'message': result.message,
+        }
+
+        if self.verbose:
+            print(f"L-BFGS finished: {result.nit} iters, {func_evals} f-evals, {grad_evals} g-evals")
+            print(f"  Final max|g| = {np.max(np.abs(g)):.3e}, converged={result.success}")
+
+        return B, C, x, info
+
     def compute_investment_value(self, B):
         """
         Compute the investment value: 0.5 * (log|Σ| - log|B|).
@@ -1570,6 +1731,279 @@ def benchmark_block_hv_general(N_values=None, H=0.6, alpha=1.0, strategy="markov
     print()
 
     return results
+
+
+def benchmark_methods(N_values=None, H=0.6, alpha=1.0, strategy="markovian"):
+    """
+    Benchmark Newton-CG vs L-BFGS methods.
+
+    Parameters
+    ----------
+    N_values : list of int
+        Values of N to test.
+    H : float
+        Hurst parameter.
+    alpha : float
+        fBM weight.
+    strategy : str
+        "markovian" or "full"
+
+    Returns
+    -------
+    results : list of dict
+        Benchmark results.
+    """
+    if N_values is None:
+        N_values = [30, 50, 75] if strategy == "full" else [50, 100, 200]
+
+    # For full strategy, we need general solver (not BlockedNewtonSolver which is Markovian-specific)
+    if strategy == "full":
+        from finance_example import (
+            make_mixed_fbm_full_info_basis_blocked,
+            spd_mixed_fbm_blocked
+        )
+
+        results = []
+
+        print("\n" + "=" * 115)
+        print(f"BENCHMARK: Newton-CG vs L-BFGS (FULL strategy)")
+        print(f"H={H}, alpha={alpha}")
+        print("=" * 115)
+        print(f"{'N':>5} {'m':>7} {'Newton-CG':>12} {'iters':>6} {'L-BFGS':>12} {'iters':>6} {'Speedup':>9} {'Value Match':>12}")
+        print("-" * 115)
+
+        for N in N_values:
+            delta_t = 1.0 / N
+
+            # Build covariance and precision
+            Sigma = spd_mixed_fbm_blocked(N, H, alpha, delta_t)
+            Lambda = np.linalg.inv(Sigma)
+            basis = make_mixed_fbm_full_info_basis_blocked(N)
+            m = basis.m
+
+            # Newton-CG using _solve_with_detailed_timing
+            t_newton, timing_newton = _solve_with_detailed_timing(Lambda, basis, tol=1e-8, use_block_hv=True)
+            iters_newton = timing_newton['newton_iters']
+
+            # L-BFGS using general implementation
+            t_lbfgs, info_lbfgs = _solve_lbfgs_general(Lambda, basis, tol=1e-8)
+            iters_lbfgs = info_lbfgs['iters']
+
+            # Compute values for comparison
+            value_newton = timing_newton.get('final_value', 0)
+            value_lbfgs = info_lbfgs.get('final_value', 0)
+
+            value_match = np.abs(value_newton - value_lbfgs) < 1e-4 if value_newton != 0 else True
+            match_str = "OK" if value_match else f"DIFF={abs(value_newton - value_lbfgs):.2e}"
+
+            speedup = t_newton / t_lbfgs if t_lbfgs > 0 else float('inf')
+
+            print(f"{N:>5} {m:>7} {t_newton:>11.3f}s {iters_newton:>6} {t_lbfgs:>11.3f}s {iters_lbfgs:>6} {speedup:>8.2f}x {match_str:>12}")
+
+            results.append({
+                'N': N,
+                'm': m,
+                'strategy': strategy,
+                't_newton': t_newton,
+                'iters_newton': iters_newton,
+                't_lbfgs': t_lbfgs,
+                'iters_lbfgs': iters_lbfgs,
+                'speedup': speedup,
+            })
+
+        print("=" * 115)
+        if results:
+            avg_speedup = np.mean([r['speedup'] for r in results])
+            print(f"Average L-BFGS speedup over Newton-CG: {avg_speedup:.2f}x")
+            print(f"(Speedup > 1 means L-BFGS is faster)")
+        print()
+
+        return results
+
+    # Markovian strategy uses BlockedNewtonSolver
+    results = []
+
+    print("\n" + "=" * 115)
+    print(f"BENCHMARK: Newton-CG vs L-BFGS (MARKOVIAN strategy)")
+    print(f"H={H}, alpha={alpha}")
+    print("=" * 115)
+    print(f"{'N':>5} {'m':>7} {'Newton-CG':>12} {'iters':>6} {'L-BFGS':>12} {'iters':>6} {'Speedup':>9} {'Value Match':>12}")
+    print("-" * 115)
+
+    for N in N_values:
+        delta_t = 1.0 / N
+
+        # Create solver (Markovian-specific)
+        solver = BlockedNewtonSolver(N, H, alpha, delta_t, verbose=False)
+        m = solver.m
+
+        # Newton-CG (with block Hv optimization)
+        B_newton, C_newton, x_newton, info_newton = solver.solve(
+            tol=1e-8, method="newton-cg", use_block_opt=True, use_block_hv=True
+        )
+        t_newton = info_newton['time']
+        iters_newton = info_newton['iters']
+        value_newton = solver.compute_investment_value(B_newton)
+
+        # L-BFGS
+        B_lbfgs, C_lbfgs, x_lbfgs, info_lbfgs = solver.solve_lbfgs(
+            tol=1e-8, use_block_opt=True, history_size=10
+        )
+        t_lbfgs = info_lbfgs['time']
+        iters_lbfgs = info_lbfgs['iters']
+        value_lbfgs = solver.compute_investment_value(B_lbfgs)
+
+        # Check values match
+        value_match = np.abs(value_newton - value_lbfgs) < 1e-4
+        match_str = "OK" if value_match else f"DIFF={abs(value_newton - value_lbfgs):.2e}"
+
+        speedup = t_newton / t_lbfgs if t_lbfgs > 0 else float('inf')
+
+        print(f"{N:>5} {m:>7} {t_newton:>11.3f}s {iters_newton:>6} {t_lbfgs:>11.3f}s {iters_lbfgs:>6} {speedup:>8.2f}x {match_str:>12}")
+
+        results.append({
+            'N': N,
+            'm': m,
+            'strategy': strategy,
+            't_newton': t_newton,
+            'iters_newton': iters_newton,
+            't_lbfgs': t_lbfgs,
+            'iters_lbfgs': iters_lbfgs,
+            'speedup': speedup,
+            'value_newton': value_newton,
+            'value_lbfgs': value_lbfgs,
+            'value_match': value_match,
+        })
+
+    print("=" * 115)
+    if results:
+        avg_speedup = np.mean([r['speedup'] for r in results])
+        print(f"Average L-BFGS speedup over Newton-CG: {avg_speedup:.2f}x")
+        print(f"(Speedup > 1 means L-BFGS is faster)")
+    print()
+
+    return results
+
+
+def _solve_lbfgs_general(Lambda, basis, tol=1e-8, max_iter=500, history_size=10):
+    """
+    General L-BFGS solver for any basis (not Markovian-specific).
+
+    Parameters
+    ----------
+    Lambda : array (n, n)
+        Precision matrix.
+    basis : SymBasis
+        Basis for the constraint subspace.
+    tol : float
+        Convergence tolerance.
+    max_iter : int
+        Maximum iterations.
+    history_size : int
+        L-BFGS history size.
+
+    Returns
+    -------
+    total_time : float
+        Total solve time.
+    info : dict
+        Solver information.
+    """
+    import time
+    from scipy.optimize import minimize
+
+    t_start = time.time()
+
+    n = Lambda.shape[0]
+    m = basis.m
+    coo_data = basis._coo
+
+    # Cache for B
+    cached_x = None
+    cached_B = None
+
+    def build_C(x_vec):
+        C = np.zeros((n, n), dtype=np.float64)
+        for k in range(m):
+            rows, cols, vals = coo_data[k]
+            C[rows, cols] += x_vec[k] * vals
+        return C
+
+    def objective(x_vec):
+        nonlocal cached_x, cached_B
+
+        M = Lambda - build_C(x_vec)
+        try:
+            L = np.linalg.cholesky(M)
+            B = np.linalg.solve(L.T, np.linalg.solve(L, np.eye(n)))
+            cached_x = x_vec.copy()
+            cached_B = B
+        except np.linalg.LinAlgError:
+            cached_x = None
+            cached_B = None
+            return 1e10
+
+        sign, logdet = np.linalg.slogdet(B)
+        if sign <= 0:
+            return 1e10
+        return logdet
+
+    def gradient(x_vec):
+        nonlocal cached_x, cached_B
+
+        if cached_x is not None and np.allclose(x_vec, cached_x):
+            B = cached_B
+        else:
+            M = Lambda - build_C(x_vec)
+            try:
+                L = np.linalg.cholesky(M)
+                B = np.linalg.solve(L.T, np.linalg.solve(L, np.eye(n)))
+                cached_x = x_vec.copy()
+                cached_B = B
+            except np.linalg.LinAlgError:
+                return np.zeros(m)
+
+        # g_k = tr(B D_k)
+        # f(x) = log det(B), ∇f_k = g_k
+        g = np.zeros(m, dtype=np.float64)
+        for k in range(m):
+            rows, cols, vals = coo_data[k]
+            g[k] = np.sum(B[rows, cols] * vals)
+
+        return g
+
+    x0 = np.zeros(m, dtype=np.float64)
+
+    result = minimize(
+        objective,
+        x0,
+        method='L-BFGS-B',
+        jac=gradient,
+        options={
+            'maxiter': max_iter,
+            'gtol': tol,
+            'maxcor': history_size,
+        }
+    )
+
+    t_total = time.time() - t_start
+
+    # Compute final value
+    x = result.x
+    M = Lambda - build_C(x)
+    B = np.linalg.inv(M)
+    Sigma = np.linalg.inv(Lambda)
+    _, log_det_Sigma = np.linalg.slogdet(Sigma)
+    _, log_det_B = np.linalg.slogdet(B)
+    final_value = 0.5 * (log_det_Sigma - log_det_B)
+
+    info = {
+        'iters': result.nit,
+        'converged': result.success,
+        'final_value': final_value,
+    }
+
+    return t_total, info
 
 
 def benchmark_detailed(N_values=None, H=0.6, alpha=1.0, strategy="markovian", use_block_hv=True):
@@ -1995,9 +2429,11 @@ if __name__ == "__main__":
                         help="Benchmark block Hv for any strategy (works with full strategy)")
     parser.add_argument("--profile", action="store_true",
                         help="Detailed profiling showing time breakdown by operation")
+    parser.add_argument("--benchmark-methods", action="store_true",
+                        help="Benchmark Newton-CG vs L-BFGS optimization methods")
     parser.add_argument("--strategy", type=str, default="markovian",
                         choices=["markovian", "full", "both"],
-                        help="Strategy for --profile/--benchmark-hv-general (default: markovian)")
+                        help="Strategy for --profile/--benchmark-hv-general/--benchmark-methods (default: markovian)")
     parser.add_argument("--N", type=str, default="50,100,200",
                         help="Comma-separated N values (default: 50,100,200)")
     parser.add_argument("--H", type=float, default=0.6, help="Hurst parameter (default: 0.6)")
@@ -2006,7 +2442,13 @@ if __name__ == "__main__":
 
     N_values = [int(n.strip()) for n in args.N.split(",")]
 
-    if args.benchmark_hv_general:
+    if args.benchmark_methods:
+        if args.strategy == "both":
+            benchmark_methods(N_values=N_values, H=args.H, alpha=args.alpha, strategy="markovian")
+            benchmark_methods(N_values=N_values, H=args.H, alpha=args.alpha, strategy="full")
+        else:
+            benchmark_methods(N_values=N_values, H=args.H, alpha=args.alpha, strategy=args.strategy)
+    elif args.benchmark_hv_general:
         if args.strategy == "both":
             benchmark_block_hv_general(N_values=N_values, H=args.H, alpha=args.alpha, strategy="markovian")
             benchmark_block_hv_general(N_values=N_values, H=args.H, alpha=args.alpha, strategy="full")
