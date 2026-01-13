@@ -96,6 +96,21 @@ def load_results_for_params(model, n, alpha, strategy):
     return H_vec, val_markov, val_full, val_sum
 
 
+def get_all_param_combinations():
+    """Get all unique (model, n, alpha) combinations from the results CSV."""
+    filename = get_results_file()
+    if not filename.exists():
+        return []
+
+    df = pd.read_csv(filename)
+    # Get unique combinations, for fbm only keep alpha=1.0
+    combos = df[['model', 'n', 'alpha']].drop_duplicates()
+    # Filter: for fbm, keep only alpha=1.0 (others are duplicates)
+    mask = (combos['model'] != 'fbm') | (np.isclose(combos['alpha'], 1.0))
+    combos = combos[mask]
+    return combos.values.tolist()
+
+
 def get_completed_H_values(model, n, alpha, strategy):
     """Get set of H values already computed for given parameters (thread/process safe)."""
     filename = get_results_file()
@@ -1329,6 +1344,8 @@ if __name__ == "__main__":
                         help="Force recomputation even if cached results exist")
     parser.add_argument("--plot-only", action="store_true",
                         help="Only plot from cached results, don't run computation")
+    parser.add_argument("--plot-all", action="store_true",
+                        help="Generate plots for all (model, n, alpha) combinations in results CSV")
     parser.add_argument("--plot-hmin", type=float, default=None,
                         help="Minimum H for plotting (default: use hmin). Filters cached data for plotting.")
     parser.add_argument("--plot-hmax", type=float, default=None,
@@ -1354,6 +1371,7 @@ if __name__ == "__main__":
     workers = args.workers
     force_rerun = args.force_rerun
     plot_only = args.plot_only
+    plot_all = args.plot_all
     plot_hmin = args.plot_hmin
     plot_hmax = args.plot_hmax
     incremental = args.incremental
@@ -1386,6 +1404,89 @@ if __name__ == "__main__":
     }
 
     results_file = get_results_file()
+
+    if plot_all:
+        # --- Plot all mode: generate plots for all (model, n, alpha) combinations ---
+        combos = get_all_param_combinations()
+        if not combos:
+            print("ERROR: No results found in CSV file")
+            exit(1)
+
+        print(f"\n{'='*60}")
+        print(f"Plot-all mode: found {len(combos)} unique (model, n, alpha) combinations")
+        print(f"{'='*60}\n")
+
+        here = Path(__file__).resolve().parent
+        n_plotted = 0
+
+        for model_i, n_i, alpha_i in combos:
+            n_i = int(n_i)
+            H_vec_i, val_markov_i, val_general_i, val_sum_i = load_results_for_params(model_i, n_i, alpha_i, 'both')
+            if H_vec_i is None or len(H_vec_i) == 0:
+                print(f"  Skipping {model_i}, n={n_i}, alpha={alpha_i}: no data")
+                continue
+
+            # Apply H range filter
+            p_hmin = plot_hmin if plot_hmin is not None else H_vec_i[0]
+            p_hmax = plot_hmax if plot_hmax is not None else H_vec_i[-1] + 1e-9
+            mask = (H_vec_i >= p_hmin) & (H_vec_i <= p_hmax)
+
+            if not np.any(mask):
+                print(f"  Skipping {model_i}, n={n_i}, alpha={alpha_i}: no data in H range [{p_hmin}, {p_hmax}]")
+                continue
+
+            H_plot = H_vec_i[mask]
+            val_markov_plot = val_markov_i[mask] if val_markov_i is not None else None
+            val_general_plot = val_general_i[mask] if val_general_i is not None else None
+            val_sum_plot = val_sum_i[mask] if val_sum_i is not None else None
+
+            # Check if we have any non-NaN values to plot
+            has_markov = val_markov_plot is not None and not np.all(np.isnan(val_markov_plot))
+            has_general = val_general_plot is not None and not np.all(np.isnan(val_general_plot))
+            has_sum = val_sum_plot is not None and not np.all(np.isnan(val_sum_plot))
+
+            if not (has_markov or has_general or has_sum):
+                print(f"  Skipping {model_i}, n={n_i}, alpha={alpha_i}: all values are NaN")
+                continue
+
+            # Create plot
+            plt.figure(figsize=(8, 5))
+            if has_markov:
+                plt.plot(H_plot, val_markov_plot, 'b-o', label="Markovian strategy", markersize=4)
+            if has_general:
+                plt.plot(H_plot, val_general_plot, 'r-s', label="Full-information strategy", markersize=4)
+            if has_sum:
+                plt.plot(H_plot, val_sum_plot, 'g-^', label="Sum strategy (no decomp)", markersize=4)
+            plt.xlabel("Hurst parameter H", fontsize=12)
+            plt.ylabel("log(Value)", fontsize=12)
+
+            if model_i == "mixed_fbm":
+                N_i = n_i // 2
+                plt.title(f"Mixed fBM: Strategy value vs H (N={N_i}, α={alpha_i})", fontsize=13)
+                if H_plot[0] <= 0.75 <= H_plot[-1]:
+                    plt.axvline(x=0.75, color='gray', linestyle='--', alpha=0.5, label='H=3/4 (arbitrage-free boundary)')
+            else:
+                plt.title(f"fBM: Strategy value vs H (n={n_i})", fontsize=13)
+
+            plt.legend()
+            plt.grid(True, alpha=0.3)
+            plt.tight_layout()
+
+            # Save figure
+            fig_dir = here / "figs" / model_i
+            fig_dir.mkdir(parents=True, exist_ok=True)
+            h_range_str = f"H_{H_plot[0]:.2f}_{H_plot[-1]:.2f}"
+            alpha_str = f"_a{alpha_i:.1f}" if model_i == "mixed_fbm" and alpha_i != 1.0 else ""
+            out_png = fig_dir / f"value_{model_i}_n_{n_i}_{h_range_str}{alpha_str}_both.png"
+            plt.savefig(out_png, dpi=150)
+            plt.close()
+            print(f"  Saved: {out_png}")
+            n_plotted += 1
+
+        print(f"\n{'='*60}")
+        print(f"Generated {n_plotted} plots")
+        print(f"{'='*60}")
+        exit(0)
 
     if plot_only:
         # --- Plot only mode: load from master CSV ---
