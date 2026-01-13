@@ -1276,6 +1276,257 @@ def benchmark_block_optimization(N_values=None, H=0.6, alpha=1.0, verbose=True):
     return results
 
 
+def benchmark_detailed(N_values=None, H=0.6, alpha=1.0, strategy="markovian"):
+    """
+    Detailed profiling benchmark showing time breakdown by operation.
+
+    Parameters
+    ----------
+    N_values : list of int
+        Values of N to test. Default: [50, 100, 200]
+    H : float
+        Hurst parameter.
+    alpha : float
+        fBM weight.
+    strategy : str
+        "markovian" or "full"
+
+    Returns
+    -------
+    results : list of dict
+        Detailed timing results.
+    """
+    if N_values is None:
+        N_values = [50, 100, 200]
+
+    from finance_example import (
+        make_mixed_fbm_markovian_basis_blocked,
+        make_mixed_fbm_full_info_basis_blocked,
+        spd_mixed_fbm_blocked
+    )
+    from constrained_decomposition_core import SymBasis
+
+    results = []
+
+    print("\n" + "=" * 100)
+    print(f"DETAILED PROFILING: {strategy.upper()} strategy")
+    print(f"H={H}, alpha={alpha}")
+    print("=" * 100)
+
+    for N in N_values:
+        delta_t = 1.0 / N
+        n = 2 * N
+
+        print(f"\n{'─'*100}")
+        print(f"N={N} (matrix size 2N={n})")
+
+        # Build covariance and precision
+        import time
+        t0 = time.time()
+        Sigma = spd_mixed_fbm_blocked(N, H, alpha, delta_t)
+        t_sigma = time.time() - t0
+
+        t0 = time.time()
+        Lambda = np.linalg.inv(Sigma)
+        t_lambda_inv = time.time() - t0
+
+        # Build basis
+        t0 = time.time()
+        if strategy == "markovian":
+            basis = make_mixed_fbm_markovian_basis_blocked(N)
+        else:
+            basis = make_mixed_fbm_full_info_basis_blocked(N)
+        t_basis = time.time() - t0
+
+        m = basis.m
+        print(f"  Basis dimension m = {m}")
+        print(f"  Setup: Σ={t_sigma:.3f}s, Λ⁻¹={t_lambda_inv:.3f}s, basis={t_basis:.3f}s")
+
+        # Detailed solve with timing
+        t_total, timing = _solve_with_detailed_timing(Lambda, basis, tol=1e-8)
+
+        # Print breakdown
+        t_B = timing['B_inverse']
+        t_grad = timing['gradient']
+        t_hv = timing['hessian_vec']
+        t_cg = timing['cg_overhead']
+        t_other = timing['other']
+        n_iters = timing['newton_iters']
+        n_hv_calls = timing['hv_calls']
+
+        print(f"\n  Newton iterations: {n_iters}, Hv calls: {n_hv_calls}")
+        print(f"\n  Time breakdown:")
+        print(f"    {'B = M⁻¹ (Cholesky):':<30} {t_B:>8.3f}s  ({100*t_B/t_total:>5.1f}%)")
+        print(f"    {'Gradient computation:':<30} {t_grad:>8.3f}s  ({100*t_grad/t_total:>5.1f}%)")
+        print(f"    {'Hessian-vector products:':<30} {t_hv:>8.3f}s  ({100*t_hv/t_total:>5.1f}%)")
+        print(f"    {'CG overhead:':<30} {t_cg:>8.3f}s  ({100*t_cg/t_total:>5.1f}%)")
+        print(f"    {'Other:':<30} {t_other:>8.3f}s  ({100*t_other/t_total:>5.1f}%)")
+        print(f"    {'─'*50}")
+        print(f"    {'TOTAL:':<30} {t_total:>8.3f}s")
+
+        # Per-call costs
+        if n_hv_calls > 0:
+            print(f"\n  Per-call costs:")
+            print(f"    Hv product: {1000*t_hv/n_hv_calls:.3f} ms/call")
+        if n_iters > 0:
+            print(f"    B inverse:  {1000*t_B/n_iters:.3f} ms/iter")
+            print(f"    Gradient:   {1000*t_grad/n_iters:.3f} ms/iter")
+
+        results.append({
+            'N': N,
+            'm': m,
+            'strategy': strategy,
+            'total_time': t_total,
+            'timing': timing,
+        })
+
+    print(f"\n{'='*100}\n")
+    return results
+
+
+def _solve_with_detailed_timing(Lambda, basis, tol=1e-8, max_iter=200):
+    """
+    Solve constrained decomposition with detailed timing breakdown.
+
+    Returns
+    -------
+    total_time : float
+    timing : dict with keys:
+        'B_inverse', 'gradient', 'hessian_vec', 'cg_overhead', 'other',
+        'newton_iters', 'hv_calls'
+    """
+    import time
+    from scipy.linalg import cho_factor, cho_solve
+    from scipy.sparse.linalg import LinearOperator, cg
+
+    n = Lambda.shape[0]
+    m = basis.m
+
+    # Timing accumulators
+    t_B_inverse = 0.0
+    t_gradient = 0.0
+    t_hessian_vec = 0.0
+    t_cg_overhead = 0.0
+    hv_call_count = 0
+
+    t_total_start = time.time()
+
+    # Initialize
+    x = np.zeros(m, dtype=np.float64)
+
+    # Get COO data from basis (stored in _coo attribute)
+    coo_data = basis._coo
+
+    def build_C(x_vec):
+        """Build C matrix from coefficients."""
+        C = np.zeros((n, n), dtype=np.float64)
+        for k in range(m):
+            if abs(x_vec[k]) < 1e-15:
+                continue
+            rows, cols, vals = coo_data[k]
+            C[rows, cols] += x_vec[k] * vals
+        return C
+
+    def compute_B(x_vec):
+        """Compute B = (Lambda - C(x))^{-1}."""
+        M = Lambda - build_C(x_vec)
+        c, lower = cho_factor(M, lower=True)
+        B = cho_solve((c, lower), np.eye(n))
+        return B
+
+    def compute_gradient(B):
+        """Compute gradient g_k = tr(B D_k)."""
+        g = np.zeros(m, dtype=np.float64)
+        for k in range(m):
+            rows, cols, vals = coo_data[k]
+            g[k] = np.sum(B[rows, cols] * vals)
+        return g
+
+    def compute_Hv(B, v):
+        """Compute Hessian-vector product."""
+        nonlocal hv_call_count
+        hv_call_count += 1
+        D_v = build_C(v)
+        BDvB = B @ D_v @ B
+        Hv = np.zeros(m, dtype=np.float64)
+        for k in range(m):
+            rows, cols, vals = coo_data[k]
+            Hv[k] = np.sum(BDvB[rows, cols] * vals)
+        return Hv
+
+    # Initial B and gradient
+    t0 = time.time()
+    B = compute_B(x)
+    t_B_inverse += time.time() - t0
+
+    t0 = time.time()
+    g = compute_gradient(B)
+    t_gradient += time.time() - t0
+
+    newton_iters = 0
+    for it in range(max_iter):
+        newton_iters = it + 1
+        max_g = np.max(np.abs(g))
+        if max_g < tol:
+            break
+
+        # CG for Newton direction
+        t0 = time.time()
+
+        def Hv_op(v):
+            nonlocal t_hessian_vec
+            t_hv_start = time.time()
+            result = compute_Hv(B, v)
+            t_hessian_vec += time.time() - t_hv_start
+            return result
+
+        H_linop = LinearOperator((m, m), matvec=Hv_op)
+        d, _ = cg(H_linop, -g, rtol=1e-6, maxiter=min(100, m))
+        t_cg_overhead += time.time() - t0 - t_hessian_vec  # CG overhead excluding Hv time
+
+        # Reset Hv time accumulator for accurate measurement
+        # (it was added during CG, now subtract what was added to cg_overhead)
+        t_cg_overhead = max(0, t_cg_overhead)
+
+        # Line search
+        step = 1.0
+        B_new = None
+        for _ in range(20):
+            x_new = x + step * d
+            try:
+                t0 = time.time()
+                B_new = compute_B(x_new)
+                t_B_inverse += time.time() - t0
+                break
+            except np.linalg.LinAlgError:
+                step *= 0.5
+
+        if B_new is None:
+            break
+
+        x = x_new
+        B = B_new
+
+        t0 = time.time()
+        g = compute_gradient(B)
+        t_gradient += time.time() - t0
+
+    t_total = time.time() - t_total_start
+    t_other = t_total - t_B_inverse - t_gradient - t_hessian_vec - t_cg_overhead
+
+    timing = {
+        'B_inverse': t_B_inverse,
+        'gradient': t_gradient,
+        'hessian_vec': t_hessian_vec,
+        'cg_overhead': t_cg_overhead,
+        'other': t_other,
+        'newton_iters': newton_iters,
+        'hv_calls': hv_call_count,
+    }
+
+    return t_total, timing
+
+
 def test_blocked_newton_solver():
     """Test the BlockedNewtonSolver."""
     from finance_example import invest_value_mixed_fbm_blocked
@@ -1322,14 +1573,26 @@ if __name__ == "__main__":
     parser.add_argument("--test", action="store_true", help="Run basic tests")
     parser.add_argument("--benchmark", action="store_true",
                         help="Benchmark block optimization vs full Cholesky")
-    parser.add_argument("--N", type=str, default="50,100,200,300,500",
-                        help="Comma-separated N values for benchmark (default: 50,100,200,300,500)")
+    parser.add_argument("--profile", action="store_true",
+                        help="Detailed profiling showing time breakdown by operation")
+    parser.add_argument("--strategy", type=str, default="markovian",
+                        choices=["markovian", "full", "both"],
+                        help="Strategy for --profile (default: markovian)")
+    parser.add_argument("--N", type=str, default="50,100,200",
+                        help="Comma-separated N values (default: 50,100,200)")
     parser.add_argument("--H", type=float, default=0.6, help="Hurst parameter (default: 0.6)")
     parser.add_argument("--alpha", type=float, default=1.0, help="fBM weight (default: 1.0)")
     args = parser.parse_args()
 
-    if args.benchmark:
-        N_values = [int(n.strip()) for n in args.N.split(",")]
+    N_values = [int(n.strip()) for n in args.N.split(",")]
+
+    if args.profile:
+        if args.strategy == "both":
+            benchmark_detailed(N_values=N_values, H=args.H, alpha=args.alpha, strategy="markovian")
+            benchmark_detailed(N_values=N_values, H=args.H, alpha=args.alpha, strategy="full")
+        else:
+            benchmark_detailed(N_values=N_values, H=args.H, alpha=args.alpha, strategy=args.strategy)
+    elif args.benchmark:
         benchmark_block_optimization(N_values=N_values, H=args.H, alpha=args.alpha)
     elif args.test:
         test_toeplitz_fft()
