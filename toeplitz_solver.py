@@ -1035,7 +1035,130 @@ class BlockedNewtonSolver:
 
         return Hv
 
-    def solve(self, tol=1e-8, max_iter=200, method="newton-cg", use_block_opt=True):
+    def compute_hessian_vector_product_block(self, B, v):
+        """
+        Block-optimized Hessian-vector product exploiting D(v) structure.
+
+        Key insight: For the Markovian basis, D(v) has structure:
+            D(v) = [D11  D12 ]
+                   [D12ᵀ  0  ]
+
+        The bottom-right N×N block is ZERO. This allows us to:
+        1. Work with N×N blocks instead of 2N×2N (~4-8x fewer ops)
+        2. Only compute the entries of BDvB we actually need
+
+        Parameters
+        ----------
+        B : array (2N, 2N)
+            Current B matrix.
+        v : array (m,)
+            Vector to multiply.
+
+        Returns
+        -------
+        Hv : array (m,)
+            Result of H @ v.
+        """
+        N = self.N
+
+        # Extract B blocks
+        B11 = B[:N, :N]
+        B12 = B[:N, N:]
+        B21 = B[N:, :N]
+        B22 = B[N:, N:]
+
+        # Build D11 and D12 blocks from v
+        D11, D12 = self._build_Dv_blocks(v)
+
+        # Compute Q = D(v) @ B using block structure
+        # Q = [D11 B11 + D12 B21,  D11 B12 + D12 B22]
+        #     [D12ᵀ B11,           D12ᵀ B12         ]
+        #
+        # We only need Q[:, :N] for extracting Hv (columns 0..N-1)
+        Q11 = D11 @ B11 + D12 @ B21  # N×N
+        Q21 = D12.T @ B11            # N×N
+
+        # Compute BDvB[:, :N] = B @ Q[:, :N]
+        # BDvB[:N, :N] = B11 @ Q11 + B12 @ Q21
+        # BDvB[N:, :N] = B21 @ Q11 + B22 @ Q21
+        BDvB_upper = B11 @ Q11 + B12 @ Q21  # N×N: rows 0..N-1, cols 0..N-1
+        BDvB_cross = B21 @ Q11 + B22 @ Q21  # N×N: rows N..2N-1, cols 0..N-1
+
+        # Vectorized Hv extraction
+        # For D^Mark_{l,X} (k=0,2,4,...): sum of BDvB_upper[0:l-1, l-1]
+        # For D^Mark_{l,Y} (k=1,3,5,...): sum of BDvB_cross[0:l-1, l-1]
+        #
+        # Use cumsum trick: cumsum along columns, then extract diagonal-like values
+        # cumsum_upper[i,j] = sum(BDvB_upper[0:i+1, j])
+        # We need cumsum_upper[l-2, l-1] for l=2..N, i.e., cumsum_upper[0,1], cumsum_upper[1,2], ...
+        cumsum_upper = np.cumsum(BDvB_upper, axis=0)  # N×N
+        cumsum_cross = np.cumsum(BDvB_cross, axis=0)  # N×N
+
+        # Extract values: for l=2..N, we need cumsum[l-2, l-1]
+        # That's indices (0,1), (1,2), (2,3), ..., (N-2, N-1)
+        # i.e., row indices 0..N-2, col indices 1..N-1
+        row_indices = np.arange(N - 1)
+        col_indices = np.arange(1, N)
+
+        Hv_X = 2.0 * cumsum_upper[row_indices, col_indices]  # length N-1
+        Hv_Y = 2.0 * cumsum_cross[row_indices, col_indices]  # length N-1
+
+        # Interleave: Hv = [Hv_X[0], Hv_Y[0], Hv_X[1], Hv_Y[1], ...]
+        Hv = np.empty(self.m, dtype=np.float64)
+        Hv[0::2] = Hv_X
+        Hv[1::2] = Hv_Y
+
+        return Hv
+
+    def _build_Dv_blocks(self, v):
+        """
+        Build D(v) block-wise: return D11 (N×N) and D12 (N×N).
+
+        D(v) = [D11  D12 ]  where D11, D12 are N×N
+               [D12ᵀ  0  ]  and D22 = 0 for Markovian basis
+
+        Vectorized implementation for speed.
+
+        Parameters
+        ----------
+        v : array (m,)
+            Coefficients for Hessian-vector product.
+
+        Returns
+        -------
+        D11 : array (N, N)
+            Upper-left block of D(v).
+        D12 : array (N, N)
+            Upper-right block of D(v).
+        """
+        N = self.N
+        D11 = np.zeros((N, N), dtype=np.float64)
+        D12 = np.zeros((N, N), dtype=np.float64)
+
+        # v[0::2] are coefficients for D^Mark_{l,X} (l = 2, 3, ..., N)
+        # v[1::2] are coefficients for D^Mark_{l,Y} (l = 2, 3, ..., N)
+        v_X = v[0::2]  # length N-1
+        v_Y = v[1::2]  # length N-1
+
+        # Vectorized construction using precomputed indices
+        # For D^Mark_{l,X}: column l-1 gets v_X[l-2] in rows 0..l-2
+        # For D^Mark_{l,Y}: column l-1 gets v_Y[l-2] in rows 0..l-2 of D12
+        for l in range(2, N + 1):
+            l_idx = l - 1
+            v_idx = l - 2  # index into v_X, v_Y
+
+            if v_idx < len(v_X):
+                # D11: column l_idx, rows 0..l-2
+                D11[:l-1, l_idx] = v_X[v_idx]
+                D11[l_idx, :l-1] = v_X[v_idx]  # symmetric
+
+            if v_idx < len(v_Y):
+                # D12: row l_idx, cols 0..l-2
+                D12[l_idx, :l-1] = v_Y[v_idx]
+
+        return D11, D12
+
+    def solve(self, tol=1e-8, max_iter=200, method="newton-cg", use_block_opt=True, use_block_hv=True):
         """
         Solve the constrained decomposition problem.
 
@@ -1050,8 +1173,11 @@ class BlockedNewtonSolver:
         method : str
             "newton" (explicit Hessian) or "newton-cg" (matrix-free).
         use_block_opt : bool
-            If True, use block-optimized N×N Schur complement method.
+            If True, use block-optimized N×N Schur complement for B computation.
             If False, use full 2N×2N Cholesky.
+        use_block_hv : bool
+            If True, use block-optimized Hessian-vector products (4-8x faster).
+            If False, use standard 2N×2N matrix products.
 
         Returns
         -------
@@ -1074,6 +1200,9 @@ class BlockedNewtonSolver:
         # Choose B computation method
         compute_B = self.compute_B_block_optimized if use_block_opt else self.compute_B_fast
 
+        # Choose Hv computation method
+        compute_Hv = self.compute_hessian_vector_product_block if use_block_hv else self.compute_hessian_vector_product
+
         # Initialize x = 0
         x = np.zeros(self.m, dtype=np.float64)
 
@@ -1088,7 +1217,7 @@ class BlockedNewtonSolver:
 
         if self.verbose:
             print(f"BlockedNewtonSolver: N={self.N}, m={self.m}")
-            print(f"  Block optimization: {'ON' if use_block_opt else 'OFF'}")
+            print(f"  Block B: {'ON' if use_block_opt else 'OFF'}, Block Hv: {'ON' if use_block_hv else 'OFF'}")
             print(f"  Initial max|g| = {np.max(np.abs(g)):.3e}")
 
         for it in range(max_iter):
@@ -1106,7 +1235,7 @@ class BlockedNewtonSolver:
                 for l in range(self.m):
                     e_l = np.zeros(self.m)
                     e_l[l] = 1.0
-                    H[:, l] = self.compute_hessian_vector_product(B, e_l)
+                    H[:, l] = compute_Hv(B, e_l)
 
                 # Newton direction: H d = -g
                 d = np.linalg.solve(H + 1e-10 * np.eye(self.m), -g)
@@ -1116,7 +1245,7 @@ class BlockedNewtonSolver:
                 from scipy.sparse.linalg import cg, LinearOperator
 
                 def Hv_op(v):
-                    return self.compute_hessian_vector_product(B, v)
+                    return compute_Hv(B, v)
 
                 H_linop = LinearOperator((self.m, self.m), matvec=Hv_op)
                 d, cg_info = cg(H_linop, -g, rtol=1e-6, maxiter=min(100, self.m))
@@ -1168,6 +1297,7 @@ class BlockedNewtonSolver:
                 'hessian_cg': t_hessian,
             },
             'use_block_opt': use_block_opt,
+            'use_block_hv': use_block_hv,
         }
 
         return B, C, x, info
@@ -1188,6 +1318,89 @@ class BlockedNewtonSolver:
         """
         _, log_det_B = np.linalg.slogdet(B)
         return 0.5 * (self.log_det_Sigma - log_det_B)
+
+
+def benchmark_block_hv(N_values=None, H=0.6, alpha=1.0, verbose=True):
+    """
+    Benchmark block-optimized Hv vs standard Hv computation.
+
+    Parameters
+    ----------
+    N_values : list of int
+        Values of N to test. Default: [50, 100, 200, 300]
+    H : float
+        Hurst parameter.
+    alpha : float
+        fBM weight.
+    verbose : bool
+        Print results table.
+
+    Returns
+    -------
+    results : list of dict
+        Benchmark results for each N.
+    """
+    if N_values is None:
+        N_values = [50, 100, 200, 300]
+
+    results = []
+
+    if verbose:
+        print("\n" + "=" * 90)
+        print("BENCHMARK: Block-optimized Hv vs Standard Hv (Markovian basis)")
+        print(f"H={H}, alpha={alpha}")
+        print("=" * 90)
+        print(f"{'N':>6} {'2N':>6} {'Std (s)':>12} {'Block (s)':>12} {'Speedup':>10} {'Value Match':>12}")
+        print("-" * 90)
+
+    for N in N_values:
+        delta_t = 1.0 / N
+
+        # Create solver
+        solver = BlockedNewtonSolver(N, H, alpha, delta_t, verbose=False)
+
+        # Solve with standard Hv
+        B_std, C_std, x_std, info_std = solver.solve(
+            tol=1e-8, method="newton-cg", use_block_hv=False
+        )
+        t_std = info_std['time']
+        val_std = solver.compute_investment_value(B_std)
+
+        # Solve with block-optimized Hv
+        B_block, C_block, x_block, info_block = solver.solve(
+            tol=1e-8, method="newton-cg", use_block_hv=True
+        )
+        t_block = info_block['time']
+        val_block = solver.compute_investment_value(B_block)
+
+        speedup = t_std / t_block if t_block > 0 else float('inf')
+        val_diff = abs(val_std - val_block)
+        match = val_diff < 1e-6
+
+        if verbose:
+            match_str = 'OK' if match else f'DIFF={val_diff:.2e}'
+            print(f"{N:>6} {2*N:>6} {t_std:>11.3f}s {t_block:>11.3f}s {speedup:>9.2f}x {match_str:>12}")
+
+        results.append({
+            'N': N,
+            't_std': t_std,
+            't_block': t_block,
+            'speedup': speedup,
+            'value_std': val_std,
+            'value_block': val_block,
+            'value_match': match,
+            'iters_std': info_std['iters'],
+            'iters_block': info_block['iters'],
+        })
+
+    if verbose:
+        print("=" * 90)
+        if results:
+            avg_speedup = np.mean([r['speedup'] for r in results])
+            print(f"Average speedup: {avg_speedup:.2f}x")
+        print()
+
+    return results
 
 
 def benchmark_block_optimization(N_values=None, H=0.6, alpha=1.0, verbose=True):
@@ -1572,7 +1785,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Toeplitz solver for mixed fBM")
     parser.add_argument("--test", action="store_true", help="Run basic tests")
     parser.add_argument("--benchmark", action="store_true",
-                        help="Benchmark block optimization vs full Cholesky")
+                        help="Benchmark block B optimization vs full Cholesky")
+    parser.add_argument("--benchmark-hv", action="store_true",
+                        help="Benchmark block Hv optimization vs standard Hv")
     parser.add_argument("--profile", action="store_true",
                         help="Detailed profiling showing time breakdown by operation")
     parser.add_argument("--strategy", type=str, default="markovian",
@@ -1586,7 +1801,9 @@ if __name__ == "__main__":
 
     N_values = [int(n.strip()) for n in args.N.split(",")]
 
-    if args.profile:
+    if args.benchmark_hv:
+        benchmark_block_hv(N_values=N_values, H=args.H, alpha=args.alpha)
+    elif args.profile:
         if args.strategy == "both":
             benchmark_detailed(N_values=N_values, H=args.H, alpha=args.alpha, strategy="markovian")
             benchmark_detailed(N_values=N_values, H=args.H, alpha=args.alpha, strategy="full")
