@@ -106,6 +106,7 @@ python finance_example.py \\
     --n ${n} \\
     --alpha ${alpha} \\
     --strategy ${strategy} \\
+    --method lbfgs \\
     --hmin ${HMIN} \\
     --hmax ${HMAX} \\
     --hres ${HRES} \\

@@ -959,6 +959,16 @@ def invest_value_mixed_fbm(H, N, alpha, delta_t, strategy, method="newton", solv
                 t_solve = time.time() - t0
                 info["iters"] = "?"
                 info["method"] = "dual"
+            elif method == "lbfgs" and strategy == "markovian":
+                # Use BlockedNewtonSolver with L-BFGS (fastest for large N)
+                from toeplitz_solver import BlockedNewtonSolver
+                t0 = time.time()
+                solver_obj = BlockedNewtonSolver(N, H, alpha, delta_t, verbose=verbose)
+                B, _, x, solve_info = solver_obj.solve_lbfgs(tol=tol, max_iter=max_iter)
+                t_solve = time.time() - t0
+                info["iters"] = solve_info["iters"]
+                info["method"] = "lbfgs"
+                info["x"] = x
             else:
                 t0 = time.time()
                 B, _, x, decomp_info = constrained_decomposition(
@@ -1296,9 +1306,9 @@ if __name__ == "__main__":
                         help="Matrix dimension (default: 100). For mixed_fbm, N=n//2 time steps.")
     parser.add_argument("--solver", type=str, choices=["primal", "dual"], default="primal",
                         help="Solver for full-info: 'primal' or 'dual' (Newton on S⊥)")
-    parser.add_argument("--method", type=str, choices=["newton", "newton-cg", "quasi-newton"], default="newton",
+    parser.add_argument("--method", type=str, choices=["newton", "newton-cg", "quasi-newton", "lbfgs"], default="lbfgs",
                         help="Optimization method: 'newton' (auto-switches to newton-cg for large m), "
-                             "'newton-cg' (matrix-free), or 'quasi-newton' (BFGS)")
+                             "'newton-cg' (matrix-free), 'quasi-newton' (BFGS), or 'lbfgs' (L-BFGS, fastest for large N)")
     parser.add_argument("--strategy", type=str, choices=["both", "markovian", "full"], default="both",
                         help="Which strategies to run: 'both', 'markovian' (fast, O(N)), or 'full' (slow, O(N²))")
     parser.add_argument("--hres", type=float, default=0.1,
