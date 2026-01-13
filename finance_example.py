@@ -112,7 +112,12 @@ def get_all_param_combinations():
 
 
 def get_completed_H_values(model, n, alpha, strategy):
-    """Get set of H values already computed for given parameters (thread/process safe)."""
+    """Get set of H values already computed for given parameters (thread/process safe).
+
+    Only considers a row complete if all relevant strategy columns have values:
+    - mixed_fbm: needs value_sum, value_markovian, value_full
+    - fbm: needs value_markovian, value_full (no sum)
+    """
     filename = get_results_file()
     if not filename.exists():
         return set()
@@ -133,6 +138,24 @@ def get_completed_H_values(model, n, alpha, strategy):
         (np.isclose(df['alpha'], alpha)) &
         (df['strategy'] == strategy)
     )
+
+    # Also check that relevant value columns are filled (not empty/NaN)
+    # For strategy="both", need all applicable columns to be complete
+    if strategy == "both":
+        has_markov = df['value_markovian'].notna() & (df['value_markovian'] != '')
+        has_full = df['value_full'].notna() & (df['value_full'] != '')
+        if model == "mixed_fbm":
+            has_sum = df['value_sum'].notna() & (df['value_sum'] != '')
+            mask = mask & has_markov & has_full & has_sum
+        else:  # fbm - no sum strategy
+            mask = mask & has_markov & has_full
+    elif strategy == "markovian":
+        has_markov = df['value_markovian'].notna() & (df['value_markovian'] != '')
+        mask = mask & has_markov
+    elif strategy == "full":
+        has_full = df['value_full'].notna() & (df['value_full'] != '')
+        mask = mask & has_full
+
     # Round to avoid floating point issues
     return set(round(h, 6) for h in df[mask]['H'].values)
 
