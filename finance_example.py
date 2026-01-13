@@ -1498,7 +1498,13 @@ if __name__ == "__main__":
             # Save figure
             fig_dir = here / "figs" / model_i
             fig_dir.mkdir(parents=True, exist_ok=True)
-            h_range_str = f"H_{H_plot[0]:.2f}_{H_plot[-1]:.2f}"
+            # Use requested H range in filename (not actual data range) for consistency
+            if plot_hmin is not None or plot_hmax is not None:
+                hmin_str = f"{plot_hmin:.2f}" if plot_hmin is not None else "0"
+                hmax_str = f"{plot_hmax:.2f}" if plot_hmax is not None else "1"
+                h_range_str = f"H_{hmin_str}_{hmax_str}"
+            else:
+                h_range_str = "H_full"
             alpha_str = f"_a{alpha_i:.1f}" if model_i == "mixed_fbm" and alpha_i != 1.0 else ""
             out_png = fig_dir / f"value_{model_i}_n_{n_i}_{h_range_str}{alpha_str}_both.png"
             plt.savefig(out_png, dpi=150)
@@ -1729,9 +1735,14 @@ if __name__ == "__main__":
     fig_dir = here / "figs" / model_type
     fig_dir.mkdir(parents=True, exist_ok=True)
 
-    # Include H range and alpha in filename for uniqueness
-    h_range_str = f"H_{H_plot[0]:.2f}_{H_plot[-1]:.2f}"
-    alpha_str = f"a{alpha:.1f}" if alpha != 1.0 else ""
+    # Use requested H range in filename (not actual data range) for consistency
+    if plot_hmin is not None or plot_hmax is not None:
+        hmin_str = f"{plot_hmin:.2f}" if plot_hmin is not None else "0"
+        hmax_str = f"{plot_hmax:.2f}" if plot_hmax is not None else "1"
+        h_range_str = f"H_{hmin_str}_{hmax_str}"
+    else:
+        h_range_str = "H_full"
+    alpha_str = f"_a{alpha:.1f}" if model_type == "mixed_fbm" and alpha != 1.0 else ""
     out_png = fig_dir / f"value_{model_type}_n_{n}_{h_range_str}{alpha_str}_{strategy}.png"
     plt.savefig(out_png, dpi=150)
     print(f"\nSaved value figure to: {out_png}")
