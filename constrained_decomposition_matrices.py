@@ -362,39 +362,154 @@ def spd_mixed_fbm(N: int, H: float = 0.75, alpha: float = 1.0, delta_t: float = 
     # Precompute fBm increment factor
     factor = (alpha ** 2) / (2 ** (1 + 2 * H)) * (delta_t ** (2 * H))
 
-    for i in range(n):
-        for j in range(n):
-            i1 = i + 1  # 1-based index
-            j1 = j + 1
+    # Indices: odd positions (0-based even) are mixed, even positions (0-based odd) are pure BM
+    odd = np.arange(0, n, 2)
+    even = odd + 1
 
-            if (i1 % 2 == 1) and (j1 % 2 == 1):
-                # Both odd: fBm increment covariance
-                diff = (i1 - j1) // 2  # difference in time indices
-                Sigma[i, j] = factor * (
-                    np.abs(diff + 1) ** (2 * H)
-                    + np.abs(diff - 1) ** (2 * H)
-                    - 2 * np.abs(diff) ** (2 * H)
-                )
-            elif (j1 % 2 == 0) and (i1 == j1 or i1 == j1 - 1):
-                # j even, i == j or i == j-1
-                Sigma[i, j] = delta_t
-            elif (j1 % 2 == 1) and (i1 == j1 + 1):
-                # j odd, i == j+1
-                Sigma[i, j] = delta_t
+    # fBM increment covariance for odd-odd block (Toeplitz-like)
+    t = np.arange(N)
+    diff = t[:, None] - t[None, :]
+    fbm_cov = (
+        np.abs(diff + 1) ** (2 * H)
+        + np.abs(diff - 1) ** (2 * H)
+        - 2 * np.abs(diff) ** (2 * H)
+    )
+    Sigma[np.ix_(odd, odd)] = factor * fbm_cov
 
     # Add BM variance on diagonal for even indices (pure BM increments)
-    for i in range(n):
-        if (i + 1) % 2 == 0:  # even 1-based index
-            Sigma[i, i] = delta_t
+    Sigma[even, even] = delta_t
 
     # Add mixed index variance on diagonal for odd indices
-    # Var(X_i^1) = Var(W increment) + alpha^2 * Var(fBM increment)
-    # = dt + alpha^2 * dt^{2H} * 2^{-2H} (since |1|^{2H} + |-1|^{2H} - 2*0 = 2)
-    for i in range(n):
-        if (i + 1) % 2 == 1:  # odd 1-based index
-            Sigma[i, i] = delta_t + factor * 2  # 2 comes from (1 + 1 - 0)
+    Sigma[odd, odd] += delta_t
+
+    # Cross terms between mixed (odd) and pure BM (even) at the same time step
+    Sigma[odd, even] = delta_t
+    Sigma[even, odd] = delta_t
 
     return Sigma
+
+
+def spd_mixed_fbm_blocked(N: int, H: float = 0.75, alpha: float = 1.0, delta_t: float = 1.0) -> np.ndarray:
+    """
+    Mixed fractional Brownian motion covariance matrix in BLOCKED ordering.
+
+    This version uses blocked variable ordering Z = (X₁,...,X_N, Y₁,...,Y_N) where:
+      - X_i = W_{i*dt} - W_{(i-1)*dt} + alpha * (B^H_{i*dt} - B^H_{(i-1)*dt})  (mixed index)
+      - Y_i = W_{i*dt} - W_{(i-1)*dt}  (pure Brownian increment)
+
+    The covariance matrix has 2×2 block structure:
+
+        Σ = [Δt I_N + α² Γ_H    Δt I_N ]
+            [    Δt I_N          Δt I_N ]
+
+    where Γ_H is the N×N Toeplitz fGn (fractional Gaussian noise) covariance matrix.
+
+    The upper-left block (X-X covariance) has Toeplitz structure, which enables
+    specialized fast solvers exploiting the Toeplitz structure.
+
+    Parameters
+    ----------
+    N : int
+        Number of time steps. Matrix size is 2N x 2N.
+    H : float, default 0.75
+        Hurst parameter in (0,1). For H > 3/4, the mixed model is arbitrage-free.
+    alpha : float, default 1.0
+        Weight of the fractional component in the mixed index.
+    delta_t : float, default 1.0
+        Time step size.
+
+    Returns
+    -------
+    Sigma : np.ndarray
+        The 2N x 2N covariance matrix (SPD) in blocked ordering.
+
+    Notes
+    -----
+    This is equivalent to spd_mixed_fbm but with blocked variable ordering.
+    The interleaved ordering is (X₁,Y₁,X₂,Y₂,...), while blocked is (X₁,...,X_N,Y₁,...,Y_N).
+
+    The blocked ordering enables exploitation of the Toeplitz structure in the
+    upper-left block for faster matrix operations via Schur complement.
+
+    See Also
+    --------
+    spd_mixed_fbm : Interleaved ordering version
+    fgn_cov_toeplitz : Returns just the Γ_H Toeplitz matrix
+    """
+    n = 2 * N
+
+    # === Build the Toeplitz fGn covariance (N×N) ===
+    # Use the SAME formula as spd_mixed_fbm for exact equivalence:
+    #   factor = (alpha ** 2) / (2 ** (1 + 2 * H)) * (delta_t ** (2 * H))
+    #   fbm_cov = |k+1|^{2H} + |k-1|^{2H} - 2|k|^{2H}  (note: no 0.5 factor)
+    #
+    # Combined: factor * fbm_cov = alpha^2 * delta_t^{2H} / 2^{1+2H} * fbm_cov
+    factor = (alpha ** 2) / (2 ** (1 + 2 * H)) * (delta_t ** (2 * H))
+
+    k = np.arange(N)
+    gamma = (
+        np.abs(k + 1) ** (2 * H)
+        + np.abs(k - 1) ** (2 * H)
+        - 2 * np.abs(k) ** (2 * H)
+    )
+
+    # Build full Toeplitz matrix
+    from scipy.linalg import toeplitz
+    fbm_cov = toeplitz(gamma)
+
+    # === Construct the 2N×2N block matrix ===
+    Sigma = np.zeros((n, n), dtype=float)
+
+    # Upper-left block: Δt I_N + α² Γ_H (fBM + BM variance)
+    Sigma[:N, :N] = factor * fbm_cov + delta_t * np.eye(N)
+
+    # Upper-right block: Δt I_N (X-Y cross-correlation from shared BM)
+    Sigma[:N, N:] = delta_t * np.eye(N)
+
+    # Lower-left block: Δt I_N (Y-X cross-correlation)
+    Sigma[N:, :N] = delta_t * np.eye(N)
+
+    # Lower-right block: Δt I_N (Y-Y: pure BM variance)
+    Sigma[N:, N:] = delta_t * np.eye(N)
+
+    return Sigma
+
+
+def fgn_cov_toeplitz(N: int, H: float = 0.75, alpha: float = 1.0, delta_t: float = 1.0) -> np.ndarray:
+    """
+    Compute the scaled Toeplitz fGn (fractional Gaussian noise) covariance matrix.
+
+    Uses the SAME scaling as spd_mixed_fbm for consistency:
+        factor = (alpha ** 2) / (2 ** (1 + 2 * H)) * (delta_t ** (2 * H))
+        gamma(k) = |k+1|^{2H} + |k-1|^{2H} - 2|k|^{2H}  (note: no 0.5 factor)
+
+    The result is factor * Toeplitz(gamma).
+
+    Parameters
+    ----------
+    N : int
+        Matrix dimension.
+    H : float, default 0.75
+        Hurst parameter in (0,1).
+    alpha : float, default 1.0
+        Weight of fBM component.
+    delta_t : float, default 1.0
+        Time step size.
+
+    Returns
+    -------
+    Gamma_H : np.ndarray
+        The N×N scaled Toeplitz covariance matrix.
+    """
+    factor = (alpha ** 2) / (2 ** (1 + 2 * H)) * (delta_t ** (2 * H))
+    k = np.arange(N)
+    gamma = (
+        np.abs(k + 1) ** (2 * H)
+        + np.abs(k - 1) ** (2 * H)
+        - 2 * np.abs(k) ** (2 * H)
+    )
+    from scipy.linalg import toeplitz
+    return factor * toeplitz(gamma)
 
 
 def spd_sum_fbm(n: int, H: float = 0.75, alpha: float = 1.0, delta_t: float = None) -> np.ndarray:
@@ -434,25 +549,20 @@ def spd_sum_fbm(n: int, H: float = 0.75, alpha: float = 1.0, delta_t: float = No
     if delta_t is None:
         delta_t = 1.0 / n
 
-    Gamma = np.zeros((n, n), dtype=float)
-
     # fBM increment covariance factor - SAME as spd_mixed_fbm
     factor = (alpha ** 2) / (2 ** (1 + 2 * H)) * (delta_t ** (2 * H))
 
-    for i in range(n):
-        for j in range(n):
-            diff = i - j
-            # fBM increment covariance: (|d+1|^{2H} + |d-1|^{2H} - 2|d|^{2H})
-            fbm_cov = (
-                np.abs(diff + 1) ** (2.0 * H)
-                + np.abs(diff - 1) ** (2.0 * H)
-                - 2.0 * np.abs(diff) ** (2.0 * H)
-            )
-            Gamma[i, j] = factor * fbm_cov
+    t = np.arange(n)
+    diff = t[:, None] - t[None, :]
+    fbm_cov = (
+        np.abs(diff + 1) ** (2.0 * H)
+        + np.abs(diff - 1) ** (2.0 * H)
+        - 2.0 * np.abs(diff) ** (2.0 * H)
+    )
+    Gamma = factor * fbm_cov
 
     # Add BM variance on diagonal: delta_t * delta_ij (same as spd_mixed_fbm)
-    for i in range(n):
-        Gamma[i, i] += delta_t
+    Gamma[np.diag_indices(n)] += delta_t
 
     return Gamma
 

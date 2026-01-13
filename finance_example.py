@@ -1,6 +1,7 @@
 from constrained_decomposition_core import *
 from constrained_decomposition_core import make_orthogonal_complement_basis, constrained_decomposition_dual
 from constrained_decomposition_matrices import *
+from constrained_decomposition_matrices import spd_mixed_fbm_blocked, fgn_cov_toeplitz
 from constrained_decomposition_viz import plot_decomposition_heatmaps
 import matplotlib.pyplot as plt
 from pathlib import Path
@@ -213,6 +214,472 @@ def make_mixed_fbm_full_info_basis(N: int):
     return SymBasis(n=n, coo_mats=coo_mats, name=f"mixed_fbm_full_info_N={N}")
 
 
+# =============================================================================
+# BLOCKED ORDERING BASIS FUNCTIONS
+# =============================================================================
+# These are for the blocked variable ordering Z = (X₁,...,X_N, Y₁,...,Y_N)
+# which enables exploitation of Toeplitz structure in the Schur complement.
+
+def make_mixed_fbm_markovian_basis_blocked(N: int):
+    """
+    Build the Markovian strategy basis for mixed fBM in BLOCKED ordering (COO sparse format).
+
+    For blocked ordering Z = (X₁,...,X_N, Y₁,...,Y_N), the Markovian basis consists of:
+
+    D^Mark_{l,X}: Symmetric matrix with 1s at (r,l) and (l,r) for r = 1,...,l-1
+                  (within the X-block, upper-left N×N)
+
+    D^Mark_{l,Y}: Symmetric matrix with 1s at (N+r,l) and (l,N+r) for r = 1,...,l-1
+                  (cross-block between Y and X)
+
+    for l = 2,...,N (l=1 gives empty matrices).
+
+    Total dimension: 2*(N-1) = O(N)
+
+    Parameters
+    ----------
+    N : int
+        Number of time steps. Matrix size is 2N x 2N.
+
+    Returns
+    -------
+    basis : SymBasis
+        The Markovian basis in blocked ordering.
+
+    Notes
+    -----
+    The key advantage of blocked ordering is that C(x) in Λ = B^{-1} + C has
+    structure where the Schur complement S(x) = α²Γ_H - C̃(x) is Toeplitz,
+    enabling fast O(N²) operations via Toeplitz algorithms.
+    """
+    n = 2 * N
+    coo_mats = []
+
+    for l in range(2, N + 1):  # l = 2, ..., N (l=1 is empty)
+        l_idx = l - 1  # 0-based index for column l
+
+        # --- D^Mark_{l,X}: entries in upper-left N×N block ---
+        # Positions (r-1, l-1) and (l-1, r-1) for r = 1,...,l-1
+        rows_X, cols_X, vals_X = [], [], []
+        for r in range(1, l):  # r = 1, ..., l-1
+            r_idx = r - 1  # 0-based
+            rows_X.extend([r_idx, l_idx])
+            cols_X.extend([l_idx, r_idx])
+            vals_X.extend([1.0, 1.0])
+        if rows_X:
+            coo_mats.append((np.array(rows_X, dtype=int),
+                             np.array(cols_X, dtype=int),
+                             np.array(vals_X, dtype=float)))
+
+        # --- D^Mark_{l,Y}: entries in cross-block (Y rows, X cols) ---
+        # Positions (N+r-1, l-1) and (l-1, N+r-1) for r = 1,...,l-1
+        rows_Y, cols_Y, vals_Y = [], [], []
+        for r in range(1, l):  # r = 1, ..., l-1
+            r_idx_Y = N + r - 1  # 0-based, in Y block
+            rows_Y.extend([r_idx_Y, l_idx])
+            cols_Y.extend([l_idx, r_idx_Y])
+            vals_Y.extend([1.0, 1.0])
+        if rows_Y:
+            coo_mats.append((np.array(rows_Y, dtype=int),
+                             np.array(cols_Y, dtype=int),
+                             np.array(vals_Y, dtype=float)))
+
+    return SymBasis(n=n, coo_mats=coo_mats, name=f"mixed_fbm_markovian_blocked_N={N}")
+
+
+def make_mixed_fbm_full_info_basis_blocked(N: int):
+    """
+    Build the full-information strategy basis for mixed fBM in BLOCKED ordering.
+
+    For blocked ordering Z = (X₁,...,X_N, Y₁,...,Y_N), the full-info basis is:
+
+    For l = 2,...,N:
+      - D^{r,l} for r = 1,...,l-1: entries at (r,l) and (l,r) in X-block
+      - D^{N+r,l} for r = 1,...,l-1: entries at (N+r,l) and (l,N+r) cross-block
+
+    Total dimension: N*(N-1) = O(N²)
+
+    Parameters
+    ----------
+    N : int
+        Number of time steps. Matrix size is 2N x 2N.
+
+    Returns
+    -------
+    basis : SymBasis
+        The full-info basis in blocked ordering.
+    """
+    n = 2 * N
+    coo_mats = []
+
+    for l in range(2, N + 1):  # l = 2, ..., N
+        l_idx = l - 1  # 0-based
+
+        # --- X-block entries: D^{r,l} ---
+        for r in range(1, l):  # r = 1, ..., l-1
+            r_idx = r - 1  # 0-based
+            rows = np.array([r_idx, l_idx], dtype=int)
+            cols = np.array([l_idx, r_idx], dtype=int)
+            vals = np.array([1.0, 1.0], dtype=float)
+            coo_mats.append((rows, cols, vals))
+
+        # --- Cross-block entries: D^{N+r,l} ---
+        for r in range(1, l):  # r = 1, ..., l-1
+            r_idx_Y = N + r - 1  # 0-based, in Y block
+            rows = np.array([r_idx_Y, l_idx], dtype=int)
+            cols = np.array([l_idx, r_idx_Y], dtype=int)
+            vals = np.array([1.0, 1.0], dtype=float)
+            coo_mats.append((rows, cols, vals))
+
+    return SymBasis(n=n, coo_mats=coo_mats, name=f"mixed_fbm_full_info_blocked_N={N}")
+
+
+def get_interleaved_to_blocked_permutation(N: int) -> np.ndarray:
+    """
+    Get the permutation matrix P that converts interleaved to blocked ordering.
+
+    Interleaved: (X₁,Y₁,X₂,Y₂,...,X_N,Y_N)
+    Blocked:     (X₁,X₂,...,X_N,Y₁,Y₂,...,Y_N)
+
+    If Σ_int is the interleaved covariance and Σ_blk is the blocked covariance:
+        Σ_blk = P @ Σ_int @ P.T
+
+    Parameters
+    ----------
+    N : int
+        Number of time steps.
+
+    Returns
+    -------
+    P : np.ndarray
+        The 2N×2N permutation matrix.
+    """
+    n = 2 * N
+    P = np.zeros((n, n), dtype=float)
+
+    # X variables: interleaved positions 0,2,4,...,2N-2 -> blocked positions 0,1,2,...,N-1
+    for i in range(N):
+        P[i, 2 * i] = 1.0  # X_i in interleaved is at 2i, in blocked at i
+
+    # Y variables: interleaved positions 1,3,5,...,2N-1 -> blocked positions N,N+1,...,2N-1
+    for i in range(N):
+        P[N + i, 2 * i + 1] = 1.0  # Y_i in interleaved is at 2i+1, in blocked at N+i
+
+    return P
+
+
+def verify_blocked_ordering(N: int = 10, H: float = 0.6, alpha: float = 1.0, verbose: bool = True):
+    """
+    Verify that the blocked ordering produces equivalent results to interleaved ordering.
+
+    This checks:
+    1. The covariance matrices are related by permutation: Σ_blk = P @ Σ_int @ P.T
+    2. The eigenvalues are the same (determinant is the same)
+    3. The investment values are the same for both orderings
+
+    Parameters
+    ----------
+    N : int
+        Number of time steps.
+    H : float
+        Hurst parameter.
+    alpha : float
+        fBM weight.
+    verbose : bool
+        Print detailed output.
+
+    Returns
+    -------
+    success : bool
+        True if all checks pass.
+    """
+    delta_t = 1.0 / N
+
+    if verbose:
+        print(f"\n{'='*60}")
+        print(f"Verifying blocked vs interleaved ordering")
+        print(f"N={N}, H={H:.2f}, alpha={alpha:.2f}, delta_t={delta_t:.6f}")
+        print(f"{'='*60}")
+
+    # Build both covariance matrices
+    Sigma_int = spd_mixed_fbm(N, H=H, alpha=alpha, delta_t=delta_t)
+    Sigma_blk = spd_mixed_fbm_blocked(N, H=H, alpha=alpha, delta_t=delta_t)
+
+    # Get permutation matrix
+    P = get_interleaved_to_blocked_permutation(N)
+
+    # Check permutation relationship: Σ_blk = P @ Σ_int @ P.T
+    Sigma_int_permuted = P @ Sigma_int @ P.T
+    perm_diff = np.max(np.abs(Sigma_blk - Sigma_int_permuted))
+
+    if verbose:
+        print(f"\n1. Permutation check: max|Σ_blk - P·Σ_int·P'| = {perm_diff:.2e}")
+
+    perm_ok = perm_diff < 1e-12
+
+    # Check eigenvalues are the same
+    eig_int = np.linalg.eigvalsh(Sigma_int)
+    eig_blk = np.linalg.eigvalsh(Sigma_blk)
+    eig_diff = np.max(np.abs(np.sort(eig_int) - np.sort(eig_blk)))
+
+    if verbose:
+        print(f"2. Eigenvalue check: max|λ_int - λ_blk| = {eig_diff:.2e}")
+
+    eig_ok = eig_diff < 1e-12
+
+    # Check log-determinants are the same
+    _, logdet_int = np.linalg.slogdet(Sigma_int)
+    _, logdet_blk = np.linalg.slogdet(Sigma_blk)
+    logdet_diff = np.abs(logdet_int - logdet_blk)
+
+    if verbose:
+        print(f"3. Log-det check: |log|Σ_int| - log|Σ_blk|| = {logdet_diff:.2e}")
+
+    logdet_ok = logdet_diff < 1e-12
+
+    # Compute investment values with both orderings
+    # For sum strategy, value should be identical since it's the same N×N block
+    Lambda_int = spd_inverse(Sigma_int)
+    Lambda_blk = spd_inverse(Sigma_blk)
+
+    # Sum strategy (always diagonal B)
+    log_B_int = -np.sum(np.log(np.diag(Lambda_int)))
+    log_B_blk = -np.sum(np.log(np.diag(Lambda_blk)))
+    value_sum_int = 0.5 * (logdet_int - log_B_int)
+    value_sum_blk = 0.5 * (logdet_blk - log_B_blk)
+    value_sum_diff = np.abs(value_sum_int - value_sum_blk)
+
+    if verbose:
+        print(f"\n4. Sum strategy value check:")
+        print(f"   Interleaved: {value_sum_int:.10f}")
+        print(f"   Blocked:     {value_sum_blk:.10f}")
+        print(f"   Difference:  {value_sum_diff:.2e}")
+
+    # Note: Sum values won't be exactly equal because the diagonal of Lambda
+    # is different between orderings (even though eigenvalues are same)
+    # This is expected - the constraint structure is different!
+
+    # For Markovian strategy, test with blocked basis
+    basis_int = make_mixed_fbm_markovian_basis(N)
+    basis_blk = make_mixed_fbm_markovian_basis_blocked(N)
+
+    if verbose:
+        print(f"\n5. Markovian basis dimensions:")
+        print(f"   Interleaved: {basis_int.m}")
+        print(f"   Blocked:     {basis_blk.m}")
+
+    # Run decomposition with both
+    B_int, C_int, x_int = constrained_decomposition(Lambda_int, basis_int, method="newton", verbose=False)
+    B_blk, C_blk, x_blk = constrained_decomposition(Lambda_blk, basis_blk, method="newton", verbose=False)
+
+    _, logdet_B_int = np.linalg.slogdet(B_int)
+    _, logdet_B_blk = np.linalg.slogdet(B_blk)
+
+    value_markov_int = 0.5 * (logdet_int - logdet_B_int)
+    value_markov_blk = 0.5 * (logdet_blk - logdet_B_blk)
+    value_markov_diff = np.abs(value_markov_int - value_markov_blk)
+
+    if verbose:
+        print(f"\n6. Markovian strategy value check:")
+        print(f"   Interleaved: {value_markov_int:.10f}")
+        print(f"   Blocked:     {value_markov_blk:.10f}")
+        print(f"   Difference:  {value_markov_diff:.2e}")
+
+    markov_ok = value_markov_diff < 1e-6
+
+    # Summary
+    all_ok = perm_ok and eig_ok and logdet_ok and markov_ok
+
+    if verbose:
+        print(f"\n{'='*60}")
+        print(f"RESULT: {'PASS' if all_ok else 'FAIL'}")
+        if not perm_ok:
+            print(f"  - Permutation check FAILED")
+        if not eig_ok:
+            print(f"  - Eigenvalue check FAILED")
+        if not logdet_ok:
+            print(f"  - Log-det check FAILED")
+        if not markov_ok:
+            print(f"  - Markovian value check FAILED")
+        print(f"{'='*60}\n")
+
+    return all_ok
+
+
+def benchmark_blocked_vs_interleaved(N_values=None, H=0.6, alpha=1.0, strategy="markovian"):
+    """
+    Benchmark blocked vs interleaved ordering performance.
+
+    Parameters
+    ----------
+    N_values : list of int
+        Values of N to test. Default: [10, 20, 50, 100]
+    H : float
+        Hurst parameter.
+    alpha : float
+        fBM weight.
+    strategy : str
+        Strategy to benchmark.
+
+    Returns
+    -------
+    results : list of dict
+        Benchmark results for each N.
+    """
+    if N_values is None:
+        N_values = [10, 20, 50, 100]
+
+    print(f"\n{'='*70}")
+    print(f"Benchmark: Blocked vs Interleaved Ordering")
+    print(f"H={H}, alpha={alpha}, strategy={strategy}")
+    print(f"{'='*70}")
+    print(f"{'N':>6} {'Interleaved':>15} {'Blocked':>15} {'Speedup':>10} {'Match':>8}")
+    print(f"{'-'*70}")
+
+    results = []
+
+    for N in N_values:
+        delta_t = 1.0 / N
+
+        # Interleaved
+        val_int, info_int = invest_value_mixed_fbm(H, N, alpha, delta_t, strategy=strategy)
+        t_int = info_int["time"]
+
+        # Blocked
+        val_blk, info_blk = invest_value_mixed_fbm_blocked(H, N, alpha, delta_t, strategy=strategy)
+        t_blk = info_blk["time"]
+
+        speedup = t_int / t_blk if t_blk > 0 else float('inf')
+        match = abs(val_int - val_blk) < 1e-8
+
+        print(f"{N:>6} {t_int:>14.3f}s {t_blk:>14.3f}s {speedup:>9.2f}x {'OK' if match else 'FAIL':>8}")
+
+        results.append({
+            'N': N,
+            't_interleaved': t_int,
+            't_blocked': t_blk,
+            'speedup': speedup,
+            'match': match,
+            'value_interleaved': val_int,
+            'value_blocked': val_blk
+        })
+
+    print(f"{'='*70}\n")
+    return results
+
+
+def invest_value_mixed_fbm_blocked(H, N, alpha, delta_t, strategy, method="newton",
+                                     Sigma=None, Lambda=None, basis=None,
+                                     tol=1e-8, max_iter=500, verbose=False, x_init=None):
+    """
+    Compute investment value for mixed fBM using BLOCKED ordering.
+
+    This is the blocked-ordering equivalent of invest_value_mixed_fbm.
+    The blocked ordering Z = (X₁,...,X_N, Y₁,...,Y_N) enables exploitation of
+    Toeplitz structure in the upper-left block for faster operations.
+
+    Parameters
+    ----------
+    H : float
+        Hurst parameter.
+    N : int
+        Number of time steps. Matrix size is 2N×2N.
+    alpha : float
+        Weight of fBM component.
+    delta_t : float
+        Time step size.
+    strategy : str
+        "sum", "markovian", or "full".
+    method : str
+        Optimization method for decomposition.
+    Sigma : np.ndarray, optional
+        Pre-computed covariance matrix in blocked ordering.
+    Lambda : np.ndarray, optional
+        Pre-computed precision matrix.
+    basis : SymBasis, optional
+        Pre-computed basis for the strategy.
+    tol : float
+        Convergence tolerance.
+    max_iter : int
+        Maximum iterations.
+    verbose : bool
+        Print solver progress.
+    x_init : np.ndarray, optional
+        Initial guess for warm starting.
+
+    Returns
+    -------
+    value : float
+        Log investment value.
+    info : dict
+        Additional info: {"iters": int, "time": float, "method": str, "error": str or None, "x": array}
+    """
+    info = {"iters": 0, "time": 0.0, "method": strategy, "error": None, "x": None}
+    t_start = time.time()
+
+    try:
+        # === Step 1: Build covariance matrix ===
+        # Sum strategy uses N×N matrix; others use 2N×2N in blocked ordering
+        if Sigma is None:
+            if strategy == "sum":
+                Sigma = spd_sum_fbm(N, H=H, alpha=alpha, delta_t=delta_t)  # N×N
+            else:
+                Sigma = spd_mixed_fbm_blocked(N, H=H, alpha=alpha, delta_t=delta_t)  # 2N×2N
+
+        if not is_spd(Sigma):
+            info["error"] = "Sigma not SPD"
+            return np.nan, info
+
+        # === Step 2: Compute precision matrix Lambda ===
+        if Lambda is None:
+            Lambda = spd_inverse(Sigma)
+
+        if not is_spd(Lambda):
+            info["error"] = "Lambda not SPD"
+            return np.nan, info
+
+        # === Step 3: Compute log|Σ| ===
+        _, log_det_Sigma = np.linalg.slogdet(Sigma)
+
+        # === Step 4: Compute B / log|B| (strategy-specific) ===
+        if strategy == "sum":
+            # Closed-form: optimal diagonal B has B_ii = 1/Λ_ii
+            log_det_B = -float(np.sum(np.log(np.diag(Lambda))))
+            value = 0.5 * (log_det_Sigma - log_det_B)
+            info["method"] = "diagonal B"
+            info["time"] = time.time() - t_start
+            return value, info
+        else:
+            # Decomposition with blocked basis
+            if basis is None:
+                if strategy == "markovian":
+                    basis = make_mixed_fbm_markovian_basis_blocked(N)
+                elif strategy == "full":
+                    basis = make_mixed_fbm_full_info_basis_blocked(N)
+                else:
+                    raise ValueError(f"Unknown strategy: {strategy}")
+
+            B, _, x, decomp_info = constrained_decomposition(
+                A=Lambda, basis=basis, method=method,
+                tol=tol, max_iter=max_iter, verbose=verbose, return_info=True,
+                x_init=x_init
+            )
+            info["iters"] = decomp_info["iters"]
+            info["method"] = decomp_info.get("used_method", method)
+            info["x"] = x
+
+        # === Step 5: Compute log|B| and final value ===
+        _, log_det_B = np.linalg.slogdet(B)
+        value = 0.5 * (log_det_Sigma - log_det_B)
+
+    except Exception as e:
+        info["error"] = str(e)
+        value = np.nan
+
+    info["time"] = time.time() - t_start
+    return value, info
+
+
 def make_mixed_fbm_markovian_basis(N: int):
     """
     Build the Markovian strategy basis for mixed fBM (COO sparse format).
@@ -417,73 +884,109 @@ def invest_value_mixed_fbm(H, N, alpha, delta_t, strategy, method="newton", solv
     """
     info = {"iters": 0, "time": 0.0, "method": strategy, "error": None, "x": None}
     t_start = time.time()
+    t_sigma = 0.0
+    t_lambda = 0.0
+    t_basis = 0.0
+    t_solve = 0.0
+    t_logdet = 0.0
 
     try:
         # === Step 1: Build covariance matrix Sigma (N×N for sum, 2N×2N for others) ===
         if Sigma is None:
+            t0 = time.time()
             if strategy == "sum":
                 Sigma = spd_sum_fbm(N, H=H, alpha=alpha, delta_t=delta_t)
             else:
                 Sigma = spd_mixed_fbm(N, H=H, alpha=alpha, delta_t=delta_t)
+            t_sigma = time.time() - t0
 
         if not is_spd(Sigma):
             info["error"] = "Sigma not SPD"
             return np.nan, info
 
-        # === Step 2: Compute precision matrix Lambda ===
+        # === Step 2: Compute precision matrix Lambda (as needed) ===
         if Lambda is None:
+            t0 = time.time()
             Lambda = spd_inverse(Sigma)
+            t_lambda = time.time() - t0
 
         if not is_spd(Lambda):
             info["error"] = "Lambda not SPD"
             return np.nan, info
 
         # === Step 3: Compute log|Σ| (shared across all strategies) ===
+        t0 = time.time()
         _, log_det_Sigma = np.linalg.slogdet(Sigma)
+        t_logdet += time.time() - t0
 
-        # === Step 4: Compute B (strategy-specific) ===
+        # === Step 4: Compute B / log|B| (strategy-specific) ===
         if strategy == "sum":
             # Closed-form: optimal diagonal B has B_ii = 1/Λ_ii
-            B = np.diag(1.0 / np.diag(Lambda))
+            t0 = time.time()
+            log_det_B = -float(np.sum(np.log(np.diag(Lambda))))
+            value = 0.5 * (log_det_Sigma - log_det_B)
+            t_logdet += time.time() - t0
             info["method"] = "diagonal B"
+            info["time"] = time.time() - t_start
+            if verbose:
+                print(
+                    f"  [timing] sigma={t_sigma:.3f}s lambda={t_lambda:.3f}s "
+                    f"logdet={t_logdet:.3f}s solve={t_solve:.3f}s"
+                )
+            return value, info
         else:
             # Decomposition: solve Λ = B^{-1} + C with C ⊥ S
             if basis is None:
+                t0 = time.time()
                 if strategy == "markovian":
                     basis = make_mixed_fbm_markovian_basis(N)
                 elif strategy == "full":
                     basis = make_mixed_fbm_full_info_basis(N)
                 else:
                     raise ValueError(f"Unknown strategy: {strategy}")
+                t_basis = time.time() - t0
 
             if strategy == "full" and solver == "dual":
                 if basis_perp is None:
+                    t0 = time.time()
                     basis_perp = make_orthogonal_complement_basis(basis)
+                    t_basis += time.time() - t0
+                t0 = time.time()
                 B, _, _, _ = constrained_decomposition_dual(
                     A=Lambda, basis=basis, basis_perp=basis_perp,
                     tol=tol, max_iter=max_iter, verbose=verbose
                 )
+                t_solve = time.time() - t0
                 info["iters"] = "?"
                 info["method"] = "dual"
             else:
+                t0 = time.time()
                 B, _, x, decomp_info = constrained_decomposition(
                     A=Lambda, basis=basis, method=method,
                     tol=tol, max_iter=max_iter, verbose=verbose, return_info=True,
                     x_init=x_init
                 )
+                t_solve = time.time() - t0
                 info["iters"] = decomp_info["iters"]
                 info["method"] = decomp_info.get("used_method", method)
                 info["x"] = x  # Return for warm starting next iteration
 
         # === Step 5: Compute log|B| and final value (shared formula) ===
+        t0 = time.time()
         _, log_det_B = np.linalg.slogdet(B)
         value = 0.5 * (log_det_Sigma - log_det_B)
+        t_logdet += time.time() - t0
 
     except Exception as e:
         info["error"] = str(e)
         value = np.nan
 
     info["time"] = time.time() - t_start
+    if verbose:
+        print(
+            f"  [timing] sigma={t_sigma:.3f}s lambda={t_lambda:.3f}s "
+            f"basis={t_basis:.3f}s solve={t_solve:.3f}s logdet={t_logdet:.3f}s"
+        )
     return value, info
 
 
@@ -561,7 +1064,8 @@ def compute_value_vs_H_mixed_fbm(H_vec, N=50, alpha=1.0, delta_t=None, solver="p
 
         # --- Sum strategy ---
         val, info = invest_value_mixed_fbm(
-            H=H, N=N, alpha=alpha, delta_t=delta_t, strategy="sum"
+            H=H, N=N, alpha=alpha, delta_t=delta_t, strategy="sum",
+            Sigma=Sigma, Lambda=Lambda
         )
         val_sum_fbm[i] = val
         if info["error"]:
@@ -627,7 +1131,10 @@ def _compute_single_H(args):
         Lambda = spd_inverse(Sigma) if is_spd(Sigma) else None
 
         # Sum strategy
-        val, info = invest_value_mixed_fbm(H=H, N=N, alpha=alpha, delta_t=delta_t, strategy="sum")
+        val, info = invest_value_mixed_fbm(
+            H=H, N=N, alpha=alpha, delta_t=delta_t, strategy="sum",
+            Sigma=Sigma, Lambda=Lambda
+        )
         result["val_sum_fbm"] = val
         result["time_sum"] = info["time"]
         if info["error"]:
@@ -971,7 +1478,10 @@ if __name__ == "__main__":
             else:
                 # === Mixed fBM: 3 strategies (sum, markovian, full) ===
                 # Sum strategy (always computed for mixed_fbm)
-                v_sum, info = invest_value_mixed_fbm(H=H, N=N, alpha=alpha, delta_t=delta_t, strategy="sum")
+                v_sum, info = invest_value_mixed_fbm(
+                    H=H, N=N, alpha=alpha, delta_t=delta_t, strategy="sum",
+                    Sigma=Sigma, Lambda=Lambda
+                )
                 print(f"  Sum: {v_sum:.6f} ({info['time']:.2f}s)")
 
                 # Markovian strategy
