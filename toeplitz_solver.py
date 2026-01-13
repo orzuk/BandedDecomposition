@@ -1489,7 +1489,90 @@ def benchmark_block_optimization(N_values=None, H=0.6, alpha=1.0, verbose=True):
     return results
 
 
-def benchmark_detailed(N_values=None, H=0.6, alpha=1.0, strategy="markovian"):
+def benchmark_block_hv_general(N_values=None, H=0.6, alpha=1.0, strategy="markovian"):
+    """
+    Benchmark block-optimized Hv vs standard Hv for any strategy.
+
+    Parameters
+    ----------
+    N_values : list of int
+        Values of N to test.
+    H : float
+        Hurst parameter.
+    alpha : float
+        fBM weight.
+    strategy : str
+        "markovian" or "full"
+
+    Returns
+    -------
+    results : list of dict
+        Benchmark results.
+    """
+    if N_values is None:
+        N_values = [30, 50, 75] if strategy == "full" else [50, 100, 200]
+
+    from finance_example import (
+        make_mixed_fbm_markovian_basis_blocked,
+        make_mixed_fbm_full_info_basis_blocked,
+        spd_mixed_fbm_blocked
+    )
+
+    results = []
+
+    print("\n" + "=" * 95)
+    print(f"BENCHMARK: Block Hv vs Standard Hv ({strategy.upper()} strategy)")
+    print(f"H={H}, alpha={alpha}")
+    print("=" * 95)
+    print(f"{'N':>6} {'m':>8} {'Std (s)':>12} {'Block (s)':>12} {'Speedup':>10} {'Hv calls':>10}")
+    print("-" * 95)
+
+    for N in N_values:
+        delta_t = 1.0 / N
+
+        # Build covariance and precision
+        Sigma = spd_mixed_fbm_blocked(N, H, alpha, delta_t)
+        Lambda = np.linalg.inv(Sigma)
+
+        # Build basis
+        if strategy == "markovian":
+            basis = make_mixed_fbm_markovian_basis_blocked(N)
+        else:
+            basis = make_mixed_fbm_full_info_basis_blocked(N)
+
+        m = basis.m
+
+        # Solve with standard Hv
+        t_std, timing_std = _solve_with_detailed_timing(Lambda, basis, tol=1e-8, use_block_hv=False)
+        hv_calls = timing_std['hv_calls']
+
+        # Solve with block Hv
+        t_block, timing_block = _solve_with_detailed_timing(Lambda, basis, tol=1e-8, use_block_hv=True)
+
+        speedup = t_std / t_block if t_block > 0 else float('inf')
+
+        print(f"{N:>6} {m:>8} {t_std:>11.3f}s {t_block:>11.3f}s {speedup:>9.2f}x {hv_calls:>10}")
+
+        results.append({
+            'N': N,
+            'm': m,
+            'strategy': strategy,
+            't_std': t_std,
+            't_block': t_block,
+            'speedup': speedup,
+            'hv_calls': hv_calls,
+        })
+
+    print("=" * 95)
+    if results:
+        avg_speedup = np.mean([r['speedup'] for r in results])
+        print(f"Average speedup: {avg_speedup:.2f}x")
+    print()
+
+    return results
+
+
+def benchmark_detailed(N_values=None, H=0.6, alpha=1.0, strategy="markovian", use_block_hv=True):
     """
     Detailed profiling benchmark showing time breakdown by operation.
 
@@ -1503,6 +1586,8 @@ def benchmark_detailed(N_values=None, H=0.6, alpha=1.0, strategy="markovian"):
         fBM weight.
     strategy : str
         "markovian" or "full"
+    use_block_hv : bool
+        If True, use block-optimized Hv computation.
 
     Returns
     -------
@@ -1522,7 +1607,7 @@ def benchmark_detailed(N_values=None, H=0.6, alpha=1.0, strategy="markovian"):
     results = []
 
     print("\n" + "=" * 100)
-    print(f"DETAILED PROFILING: {strategy.upper()} strategy")
+    print(f"DETAILED PROFILING: {strategy.upper()} strategy (block_hv={'ON' if use_block_hv else 'OFF'})")
     print(f"H={H}, alpha={alpha}")
     print("=" * 100)
 
@@ -1556,7 +1641,7 @@ def benchmark_detailed(N_values=None, H=0.6, alpha=1.0, strategy="markovian"):
         print(f"  Setup: Σ={t_sigma:.3f}s, Λ⁻¹={t_lambda_inv:.3f}s, basis={t_basis:.3f}s")
 
         # Detailed solve with timing
-        t_total, timing = _solve_with_detailed_timing(Lambda, basis, tol=1e-8)
+        t_total, timing = _solve_with_detailed_timing(Lambda, basis, tol=1e-8, use_block_hv=use_block_hv)
 
         # Print breakdown
         t_B = timing['B_inverse']
@@ -1597,9 +1682,22 @@ def benchmark_detailed(N_values=None, H=0.6, alpha=1.0, strategy="markovian"):
     return results
 
 
-def _solve_with_detailed_timing(Lambda, basis, tol=1e-8, max_iter=200):
+def _solve_with_detailed_timing(Lambda, basis, tol=1e-8, max_iter=200, use_block_hv=True):
     """
     Solve constrained decomposition with detailed timing breakdown.
+
+    Parameters
+    ----------
+    Lambda : array (n, n)
+        Precision matrix.
+    basis : SymBasis
+        Basis for the constraint subspace.
+    tol : float
+        Convergence tolerance.
+    max_iter : int
+        Maximum Newton iterations.
+    use_block_hv : bool
+        If True, use block-optimized Hv (requires D22=0 structure).
 
     Returns
     -------
@@ -1613,6 +1711,7 @@ def _solve_with_detailed_timing(Lambda, basis, tol=1e-8, max_iter=200):
     from scipy.sparse.linalg import LinearOperator, cg
 
     n = Lambda.shape[0]
+    N = n // 2  # For blocked ordering
     m = basis.m
 
     # Timing accumulators
@@ -1630,6 +1729,60 @@ def _solve_with_detailed_timing(Lambda, basis, tol=1e-8, max_iter=200):
     # Get COO data from basis (stored in _coo attribute)
     coo_data = basis._coo
 
+    # Precompute block indices for each basis element (for block Hv)
+    # Each basis element Dk contributes to BDvB via tr(Dk @ BDvB).
+    # We only compute BDvB[:, :N], so we need entries in columns 0..N-1.
+    # For D12 entries (row < N, col >= N), we use symmetry: BDvB[i,j] = BDvB[j,i]
+    if use_block_hv:
+        # Flatten all indices for vectorized extraction
+        all_upper_rows = []
+        all_upper_cols = []
+        all_cross_rows = []
+        all_cross_cols = []
+        upper_ptr = [0]  # Pointers for reduceat
+        cross_ptr = [0]
+
+        for k in range(m):
+            rows, cols, vals = coo_data[k]
+
+            # For each entry, determine which block it maps to
+            # BDvB is symmetric, so (i,j) and (j,i) contribute equally
+            # We compute BDvB[:, :N] only, so:
+            # - Entries with col < N go directly
+            # - Entries with col >= N use symmetry: BDvB[i, col] = BDvB[col, i] if col < N... wait
+
+            # Actually, entries with col >= N but row < N need BDvB[row, col].
+            # By symmetry BDvB[row, col] = BDvB[col, row].
+            # If col >= N, then BDvB[col, row] is in BDvB[N:, :N] = BDvB_cross.
+            # So BDvB[row, col] = BDvB_cross[col-N, row].
+
+            for i in range(len(rows)):
+                r, c = rows[i], cols[i]
+                if r < N and c < N:
+                    # D11: use BDvB_upper[r, c]
+                    all_upper_rows.append(r)
+                    all_upper_cols.append(c)
+                elif r >= N and c < N:
+                    # D21: use BDvB_cross[r-N, c]
+                    all_cross_rows.append(r - N)
+                    all_cross_cols.append(c)
+                elif r < N and c >= N:
+                    # D12: use symmetry, BDvB[r, c] = BDvB[c, r] = BDvB_cross[c-N, r]
+                    all_cross_rows.append(c - N)
+                    all_cross_cols.append(r)
+                # D22 entries (r >= N and c >= N) are skipped - shouldn't exist
+
+            upper_ptr.append(len(all_upper_rows))
+            cross_ptr.append(len(all_cross_rows))
+
+        # Convert to numpy arrays
+        all_upper_rows = np.array(all_upper_rows, dtype=int)
+        all_upper_cols = np.array(all_upper_cols, dtype=int)
+        all_cross_rows = np.array(all_cross_rows, dtype=int)
+        all_cross_cols = np.array(all_cross_cols, dtype=int)
+        upper_ptr = np.array(upper_ptr, dtype=int)
+        cross_ptr = np.array(cross_ptr, dtype=int)
+
     def build_C(x_vec):
         """Build C matrix from coefficients."""
         C = np.zeros((n, n), dtype=np.float64)
@@ -1639,6 +1792,14 @@ def _solve_with_detailed_timing(Lambda, basis, tol=1e-8, max_iter=200):
             rows, cols, vals = coo_data[k]
             C[rows, cols] += x_vec[k] * vals
         return C
+
+    def build_C_blocks(x_vec):
+        """Build C as blocks: C11 (N×N), C12 (N×N). C22 = 0 for blocked mixed fBM."""
+        # Use the full matrix build and extract blocks (simpler, same cost)
+        C = build_C(x_vec)
+        C11 = C[:N, :N]
+        C12 = C[:N, N:]
+        return C11, C12
 
     def compute_B(x_vec):
         """Compute B = (Lambda - C(x))^{-1}."""
@@ -1655,8 +1816,8 @@ def _solve_with_detailed_timing(Lambda, basis, tol=1e-8, max_iter=200):
             g[k] = np.sum(B[rows, cols] * vals)
         return g
 
-    def compute_Hv(B, v):
-        """Compute Hessian-vector product."""
+    def compute_Hv_standard(B, v):
+        """Compute Hessian-vector product (standard method)."""
         nonlocal hv_call_count
         hv_call_count += 1
         D_v = build_C(v)
@@ -1666,6 +1827,62 @@ def _solve_with_detailed_timing(Lambda, basis, tol=1e-8, max_iter=200):
             rows, cols, vals = coo_data[k]
             Hv[k] = np.sum(BDvB[rows, cols] * vals)
         return Hv
+
+    def compute_Hv_block(B, v):
+        """
+        Block-optimized Hessian-vector product.
+
+        Exploits that D(v) has structure:
+            D(v) = [D11  D12 ]
+                   [D12ᵀ  0  ]
+
+        Works with N×N blocks instead of 2N×2N.
+        Vectorized extraction for O(m) elements.
+        """
+        nonlocal hv_call_count
+        hv_call_count += 1
+
+        # Extract B blocks
+        B11 = B[:N, :N]
+        B12 = B[:N, N:]
+        B21 = B[N:, :N]
+        B22 = B[N:, N:]
+
+        # Build D blocks
+        D11, D12 = build_C_blocks(v)
+
+        # Q = D(v) @ B, but we only need first N columns
+        # Q11 = D11 @ B11 + D12 @ B21
+        # Q21 = D12.T @ B11
+        Q11 = D11 @ B11 + D12 @ B21
+        Q21 = D12.T @ B11
+
+        # BDvB[:, :N] = B @ Q[:, :N]
+        BDvB_upper = B11 @ Q11 + B12 @ Q21  # (BDvB)[0:N, 0:N]
+        BDvB_cross = B21 @ Q11 + B22 @ Q21  # (BDvB)[N:2N, 0:N]
+
+        # Vectorized extraction
+        Hv = np.zeros(m, dtype=np.float64)
+
+        # Extract all values at once, then sum by segment
+        if len(all_upper_rows) > 0:
+            upper_vals = BDvB_upper[all_upper_rows, all_upper_cols]
+            # Sum contributions for each basis element
+            for k in range(m):
+                start, end = upper_ptr[k], upper_ptr[k+1]
+                if end > start:
+                    Hv[k] += upper_vals[start:end].sum()
+
+        if len(all_cross_rows) > 0:
+            cross_vals = BDvB_cross[all_cross_rows, all_cross_cols]
+            for k in range(m):
+                start, end = cross_ptr[k], cross_ptr[k+1]
+                if end > start:
+                    Hv[k] += cross_vals[start:end].sum()
+
+        return Hv
+
+    compute_Hv = compute_Hv_block if use_block_hv else compute_Hv_standard
 
     # Initial B and gradient
     t0 = time.time()
@@ -1787,12 +2004,14 @@ if __name__ == "__main__":
     parser.add_argument("--benchmark", action="store_true",
                         help="Benchmark block B optimization vs full Cholesky")
     parser.add_argument("--benchmark-hv", action="store_true",
-                        help="Benchmark block Hv optimization vs standard Hv")
+                        help="Benchmark block Hv optimization (Markovian, uses BlockedNewtonSolver)")
+    parser.add_argument("--benchmark-hv-general", action="store_true",
+                        help="Benchmark block Hv for any strategy (works with full strategy)")
     parser.add_argument("--profile", action="store_true",
                         help="Detailed profiling showing time breakdown by operation")
     parser.add_argument("--strategy", type=str, default="markovian",
                         choices=["markovian", "full", "both"],
-                        help="Strategy for --profile (default: markovian)")
+                        help="Strategy for --profile/--benchmark-hv-general (default: markovian)")
     parser.add_argument("--N", type=str, default="50,100,200",
                         help="Comma-separated N values (default: 50,100,200)")
     parser.add_argument("--H", type=float, default=0.6, help="Hurst parameter (default: 0.6)")
@@ -1801,7 +2020,13 @@ if __name__ == "__main__":
 
     N_values = [int(n.strip()) for n in args.N.split(",")]
 
-    if args.benchmark_hv:
+    if args.benchmark_hv_general:
+        if args.strategy == "both":
+            benchmark_block_hv_general(N_values=N_values, H=args.H, alpha=args.alpha, strategy="markovian")
+            benchmark_block_hv_general(N_values=N_values, H=args.H, alpha=args.alpha, strategy="full")
+        else:
+            benchmark_block_hv_general(N_values=N_values, H=args.H, alpha=args.alpha, strategy=args.strategy)
+    elif args.benchmark_hv:
         benchmark_block_hv(N_values=N_values, H=args.H, alpha=args.alpha)
     elif args.profile:
         if args.strategy == "both":
