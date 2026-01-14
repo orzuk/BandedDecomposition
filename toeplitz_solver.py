@@ -1890,9 +1890,12 @@ def benchmark_methods(N_values=None, H=0.6, alpha=1.0, strategy="markovian"):
     return results
 
 
-def _solve_lbfgs_general(Lambda, basis, tol=1e-8, max_iter=500, history_size=10, ftol=1e-8):
+def solve_lbfgs_general(Lambda, basis, tol=1e-8, max_iter=500, history_size=10, ftol=1e-8, verbose=False):
     """
     General L-BFGS solver for any basis (not Markovian-specific).
+
+    This is a standalone function that can be used with any symmetric basis.
+    It solves: max log det(B) s.t. Lambda - B^{-1} in cone(basis)
 
     Parameters
     ----------
@@ -1901,18 +1904,26 @@ def _solve_lbfgs_general(Lambda, basis, tol=1e-8, max_iter=500, history_size=10,
     basis : SymBasis
         Basis for the constraint subspace.
     tol : float
-        Convergence tolerance.
+        Convergence tolerance (gtol for L-BFGS).
     max_iter : int
         Maximum iterations.
     history_size : int
-        L-BFGS history size.
+        L-BFGS history size (number of past gradients to keep).
+    ftol : float
+        Function tolerance for L-BFGS convergence.
+    verbose : bool
+        Print progress.
 
     Returns
     -------
-    total_time : float
-        Total solve time.
+    B : array (n, n)
+        Optimal B matrix.
+    C : array (n, n)
+        Residual C = Lambda - B^{-1}.
+    x : array (m,)
+        Optimal coefficients.
     info : dict
-        Solver information.
+        Solver information: iters, time, converged, method.
     """
     import time
     from scipy.optimize import minimize
@@ -1923,11 +1934,12 @@ def _solve_lbfgs_general(Lambda, basis, tol=1e-8, max_iter=500, history_size=10,
     m = basis.m
     coo_data = basis._coo
 
-    # Cache for B
+    # Cache for B to avoid recomputation in gradient
     cached_x = None
     cached_B = None
 
     def build_C(x_vec):
+        """Build C = sum_k x_k D_k from coefficients."""
         C = np.zeros((n, n), dtype=np.float64)
         for k in range(m):
             rows, cols, vals = coo_data[k]
@@ -1935,6 +1947,7 @@ def _solve_lbfgs_general(Lambda, basis, tol=1e-8, max_iter=500, history_size=10,
         return C
 
     def objective(x_vec):
+        """Compute -log det(B) where B = (Lambda - C)^{-1}."""
         nonlocal cached_x, cached_B
 
         M = Lambda - build_C(x_vec)
@@ -1951,9 +1964,11 @@ def _solve_lbfgs_general(Lambda, basis, tol=1e-8, max_iter=500, history_size=10,
         sign, logdet = np.linalg.slogdet(B)
         if sign <= 0:
             return 1e10
-        return logdet
+        # Minimize -log det(B) = maximize log det(B)
+        return -logdet
 
     def gradient(x_vec):
+        """Compute gradient: g_k = -tr(B D_k)."""
         nonlocal cached_x, cached_B
 
         if cached_x is not None and np.allclose(x_vec, cached_x):
@@ -1968,16 +1983,18 @@ def _solve_lbfgs_general(Lambda, basis, tol=1e-8, max_iter=500, history_size=10,
             except np.linalg.LinAlgError:
                 return np.zeros(m)
 
-        # g_k = tr(B D_k)
-        # f(x) = log det(B), ∇f_k = g_k
+        # g_k = -tr(B D_k) (negative because we minimize -log det)
         g = np.zeros(m, dtype=np.float64)
         for k in range(m):
             rows, cols, vals = coo_data[k]
-            g[k] = np.sum(B[rows, cols] * vals)
+            g[k] = -np.sum(B[rows, cols] * vals)
 
         return g
 
     x0 = np.zeros(m, dtype=np.float64)
+
+    if verbose:
+        print(f"  L-BFGS general: n={n}, m={m}, starting optimization...")
 
     result = minimize(
         objective,
@@ -1989,27 +2006,147 @@ def _solve_lbfgs_general(Lambda, basis, tol=1e-8, max_iter=500, history_size=10,
             'gtol': tol,
             'ftol': ftol,
             'maxcor': history_size,
+            'disp': verbose,
         }
     )
 
     t_total = time.time() - t_start
 
-    # Compute final value
+    # Compute final B and C
     x = result.x
-    M = Lambda - build_C(x)
+    C = build_C(x)
+    M = Lambda - C
     B = np.linalg.inv(M)
-    Sigma = np.linalg.inv(Lambda)
-    _, log_det_Sigma = np.linalg.slogdet(Sigma)
-    _, log_det_B = np.linalg.slogdet(B)
-    final_value = 0.5 * (log_det_Sigma - log_det_B)
 
     info = {
         'iters': result.nit,
+        'time': t_total,
         'converged': result.success,
-        'final_value': final_value,
+        'method': 'lbfgs-general',
+        'message': result.message,
     }
 
-    return t_total, info
+    if verbose:
+        print(f"  L-BFGS general: {result.nit} iters, {t_total:.2f}s, converged={result.success}")
+
+    return B, C, x, info
+
+
+# Keep old name as alias for backwards compatibility
+def _solve_lbfgs_general(Lambda, basis, tol=1e-8, max_iter=500, history_size=10, ftol=1e-8):
+    """Deprecated: use solve_lbfgs_general instead."""
+    B, C, x, info = solve_lbfgs_general(Lambda, basis, tol, max_iter, history_size, ftol)
+    return info['time'], info
+
+
+def benchmark_full_strategy(N_values=None, H=0.6, alpha=1.0):
+    """
+    Benchmark L-BFGS vs Newton-CG for the FULL strategy.
+
+    This is different from the Markovian benchmark because m = O(N²) for full strategy,
+    so the scaling is very different.
+
+    Parameters
+    ----------
+    N_values : list of int
+        Values of N to test. Default: [25, 50, 75, 100]
+    H : float
+        Hurst parameter.
+    alpha : float
+        fBM weight.
+
+    Returns
+    -------
+    results : list of dict
+        Benchmark results.
+    """
+    from constrained_decomposition_core import constrained_decomposition
+    from constrained_decomposition_matrices import spd_mixed_fbm, make_mixed_fbm_full_info_basis
+
+    if N_values is None:
+        N_values = [25, 50, 75, 100]
+
+    results = []
+
+    print("=" * 120)
+    print(f"Full Strategy Benchmark: L-BFGS vs Newton-CG (H={H}, alpha={alpha})")
+    print("Full strategy has m = N(N-1) basis elements, so O(N²) coefficients")
+    print("=" * 120)
+    print(f"{'N':>5} {'m':>10} {'matrix':>8} {'Newton-CG':>14} {'iters':>6} {'L-BFGS':>14} {'iters':>6} {'Speedup':>10} {'Match':>12}")
+    print("-" * 120)
+
+    for N in N_values:
+        n = 2 * N  # matrix size
+        delta_t = 1.0 / N
+
+        # Build matrix and basis
+        Sigma = spd_mixed_fbm(N, H=H, alpha=alpha, delta_t=delta_t)
+        Lambda = np.linalg.inv(Sigma)
+        basis = make_mixed_fbm_full_info_basis(N)
+        m = basis.m
+
+        print(f"{N:>5} {m:>10} {n:>6}x{n} ", end="", flush=True)
+
+        # Newton-CG
+        t0 = time.time()
+        try:
+            B_newton, _, x_newton, info_newton = constrained_decomposition(
+                A=Lambda, basis=basis, method="newton-cg",
+                tol=1e-8, max_iter=500, verbose=False, return_info=True
+            )
+            t_newton = time.time() - t0
+            iters_newton = info_newton['iters']
+            _, log_det_B = np.linalg.slogdet(B_newton)
+            _, log_det_Sigma = np.linalg.slogdet(Sigma)
+            value_newton = 0.5 * (log_det_Sigma - log_det_B)
+        except Exception as e:
+            print(f"Newton-CG FAILED: {e}")
+            continue
+
+        # L-BFGS
+        t0 = time.time()
+        try:
+            B_lbfgs, _, x_lbfgs, info_lbfgs = solve_lbfgs_general(
+                Lambda, basis, tol=1e-8, max_iter=500
+            )
+            t_lbfgs = time.time() - t0
+            iters_lbfgs = info_lbfgs['iters']
+            _, log_det_B = np.linalg.slogdet(B_lbfgs)
+            value_lbfgs = 0.5 * (log_det_Sigma - log_det_B)
+        except Exception as e:
+            print(f"L-BFGS FAILED: {e}")
+            continue
+
+        # Compare
+        value_match = np.abs(value_newton - value_lbfgs) < 1e-4
+        match_str = "OK" if value_match else f"DIFF={abs(value_newton - value_lbfgs):.2e}"
+        speedup = t_newton / t_lbfgs if t_lbfgs > 0 else float('inf')
+
+        print(f"{t_newton:>12.3f}s {iters_newton:>6} {t_lbfgs:>12.3f}s {iters_lbfgs:>6} {speedup:>9.2f}x {match_str:>12}")
+
+        results.append({
+            'N': N,
+            'n': n,
+            'm': m,
+            'strategy': 'full',
+            't_newton': t_newton,
+            'iters_newton': iters_newton,
+            't_lbfgs': t_lbfgs,
+            'iters_lbfgs': iters_lbfgs,
+            'speedup': speedup,
+            'value_newton': value_newton,
+            'value_lbfgs': value_lbfgs,
+            'value_match': value_match,
+        })
+
+    print("=" * 120)
+    if results:
+        avg_speedup = np.mean([r['speedup'] for r in results])
+        print(f"Average L-BFGS speedup over Newton-CG: {avg_speedup:.2f}x")
+        print(f"(Speedup > 1 means L-BFGS is faster)")
+    print()
+
+    return results
 
 
 def benchmark_detailed(N_values=None, H=0.6, alpha=1.0, strategy="markovian", use_block_hv=True):
