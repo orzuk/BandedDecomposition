@@ -5,3 +5,9 @@ __pycache__/
 *.lock
 .Rhistory
 *.RData
+figs/
+results/
+slurm_jobs/
+*.pdf
+*.mw
+GEMINI.md

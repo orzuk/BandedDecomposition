@@ -1773,6 +1773,8 @@ def benchmark_methods(N_values=None, H=0.6, alpha=1.0, strategy="markovian"):
         print("\n" + "=" * 115)
         print(f"BENCHMARK: Newton-CG vs L-BFGS (FULL strategy)")
         print(f"H={H}, alpha={alpha}")
+        print(f"Method 1: constrained_decomposition with method='newton-cg'")
+        print(f"Method 2: solve_lbfgs_general (scipy L-BFGS-B)")
         print("=" * 115)
         print(f"{'N':>5} {'m':>7} {'Newton-CG':>12} {'iters':>6} {'L-BFGS':>12} {'iters':>6} {'Speedup':>9} {'Value Match':>12}")
         print("-" * 115)
@@ -1789,10 +1791,13 @@ def benchmark_methods(N_values=None, H=0.6, alpha=1.0, strategy="markovian"):
             # Newton-CG using _solve_with_detailed_timing
             t_newton, timing_newton = _solve_with_detailed_timing(Lambda, basis, tol=1e-8, use_block_hv=True)
             iters_newton = timing_newton['newton_iters']
+            method_newton = timing_newton.get('method', 'newton-cg')
 
             # L-BFGS using general implementation
             t_lbfgs, info_lbfgs = _solve_lbfgs_general(Lambda, basis, tol=1e-8)
             iters_lbfgs = info_lbfgs['iters']
+            method_lbfgs = info_lbfgs.get('method', 'lbfgs-general')
+            converged_lbfgs = info_lbfgs.get('converged', False)
 
             # Compute values for comparison
             value_newton = timing_newton.get('final_value', 0)
@@ -1800,6 +1805,8 @@ def benchmark_methods(N_values=None, H=0.6, alpha=1.0, strategy="markovian"):
 
             value_match = np.abs(value_newton - value_lbfgs) < 1e-4 if value_newton != 0 else True
             match_str = "OK" if value_match else f"DIFF={abs(value_newton - value_lbfgs):.2e}"
+            if not converged_lbfgs:
+                match_str = f"FAIL:{info_lbfgs.get('message', 'unknown')[:20]}"
 
             speedup = t_newton / t_lbfgs if t_lbfgs > 0 else float('inf')
 
@@ -1831,6 +1838,8 @@ def benchmark_methods(N_values=None, H=0.6, alpha=1.0, strategy="markovian"):
     print("\n" + "=" * 115)
     print(f"BENCHMARK: Newton-CG vs L-BFGS (MARKOVIAN strategy)")
     print(f"H={H}, alpha={alpha}")
+    print(f"Method 1: BlockedNewtonSolver.solve(method='newton-cg')")
+    print(f"Method 2: BlockedNewtonSolver.solve_lbfgs() (custom L-BFGS with block structure)")
     print("=" * 115)
     print(f"{'N':>5} {'m':>7} {'Newton-CG':>12} {'iters':>6} {'L-BFGS':>12} {'iters':>6} {'Speedup':>9} {'Value Match':>12}")
     print("-" * 115)
@@ -1848,14 +1857,16 @@ def benchmark_methods(N_values=None, H=0.6, alpha=1.0, strategy="markovian"):
         )
         t_newton = info_newton['time']
         iters_newton = info_newton['iters']
+        method_newton = info_newton.get('method', 'newton-cg')
         value_newton = solver.compute_investment_value(B_newton)
 
-        # L-BFGS
+        # L-BFGS (custom implementation)
         B_lbfgs, C_lbfgs, x_lbfgs, info_lbfgs = solver.solve_lbfgs(
             tol=1e-8, use_block_opt=True, history_size=10
         )
         t_lbfgs = info_lbfgs['time']
         iters_lbfgs = info_lbfgs['iters']
+        method_lbfgs = info_lbfgs.get('method', 'lbfgs')
         value_lbfgs = solver.compute_investment_value(B_lbfgs)
 
         # Check values match
@@ -1890,9 +1901,13 @@ def benchmark_methods(N_values=None, H=0.6, alpha=1.0, strategy="markovian"):
     return results
 
 
-def solve_lbfgs_general(Lambda, basis, tol=1e-8, max_iter=500, history_size=10, ftol=1e-8, verbose=False):
+def solve_lbfgs_general(Lambda, basis, tol=1e-8, max_iter=500, history_size=10, ftol=1e-8, verbose=False,
+                        max_backtracks=60, backtracking_factor=0.5, armijo_c1=1e-4):
     """
     General L-BFGS solver for any basis (not Markovian-specific).
+
+    Uses custom L-BFGS with Armijo backtracking line search (same as constrained_decomposition)
+    instead of scipy's L-BFGS-B which fails on this problem due to Wolfe conditions.
 
     This is a standalone function that can be used with any symmetric basis.
     It solves: max log det(B) s.t. Lambda - B^{-1} in cone(basis)
@@ -1904,15 +1919,21 @@ def solve_lbfgs_general(Lambda, basis, tol=1e-8, max_iter=500, history_size=10, 
     basis : SymBasis
         Basis for the constraint subspace.
     tol : float
-        Convergence tolerance (gtol for L-BFGS).
+        Convergence tolerance for gradient norm.
     max_iter : int
         Maximum iterations.
     history_size : int
         L-BFGS history size (number of past gradients to keep).
     ftol : float
-        Function tolerance for L-BFGS convergence.
+        Function tolerance for convergence.
     verbose : bool
         Print progress.
+    max_backtracks : int
+        Maximum line search backtracks.
+    backtracking_factor : float
+        Step reduction factor for backtracking.
+    armijo_c1 : float
+        Armijo condition parameter.
 
     Returns
     -------
@@ -1926,17 +1947,13 @@ def solve_lbfgs_general(Lambda, basis, tol=1e-8, max_iter=500, history_size=10, 
         Solver information: iters, time, converged, method.
     """
     import time
-    from scipy.optimize import minimize
+    from collections import deque
 
     t_start = time.time()
 
     n = Lambda.shape[0]
     m = basis.m
     coo_data = basis._coo
-
-    # Cache for B to avoid recomputation in gradient
-    cached_x = None
-    cached_B = None
 
     def build_C(x_vec):
         """Build C = sum_k x_k D_k from coefficients."""
@@ -1946,93 +1963,155 @@ def solve_lbfgs_general(Lambda, basis, tol=1e-8, max_iter=500, history_size=10, 
             C[rows, cols] += x_vec[k] * vals
         return C
 
-    def objective(x_vec):
-        """Compute -log det(B) where B = (Lambda - C)^{-1}."""
-        nonlocal cached_x, cached_B
-
+    def objective_and_gradient(x_vec):
+        """Compute objective and gradient together (more efficient)."""
         M = Lambda - build_C(x_vec)
         try:
             L = np.linalg.cholesky(M)
+            # log det(M) = 2 * sum(log(diag(L)))
+            log_det_M = 2 * np.sum(np.log(np.diag(L)))
+            # B = M^{-1}, log det(B) = -log det(M)
+            # Objective: minimize -log det(B) = log det(M)
+            f = log_det_M
+
+            # Compute B = M^{-1} for gradient
             B = np.linalg.solve(L.T, np.linalg.solve(L, np.eye(n)))
-            cached_x = x_vec.copy()
-            cached_B = B
         except np.linalg.LinAlgError:
-            cached_x = None
-            cached_B = None
-            return 1e10
+            return 1e10, np.zeros(m)
 
-        sign, logdet = np.linalg.slogdet(B)
-        if sign <= 0:
-            return 1e10
-        # Minimize -log det(B) = maximize log det(B)
-        return -logdet
-
-    def gradient(x_vec):
-        """Compute gradient: g_k = -tr(B D_k)."""
-        nonlocal cached_x, cached_B
-
-        if cached_x is not None and np.allclose(x_vec, cached_x):
-            B = cached_B
-        else:
-            M = Lambda - build_C(x_vec)
-            try:
-                L = np.linalg.cholesky(M)
-                B = np.linalg.solve(L.T, np.linalg.solve(L, np.eye(n)))
-                cached_x = x_vec.copy()
-                cached_B = B
-            except np.linalg.LinAlgError:
-                return np.zeros(m)
-
-        # g_k = -tr(B D_k) (negative because we minimize -log det)
+        # g_k = d/dx_k [log det(M)] = tr(M^{-1} dM/dx_k) = tr(B * (-D_k)) = -tr(B D_k)
         g = np.zeros(m, dtype=np.float64)
         for k in range(m):
             rows, cols, vals = coo_data[k]
             g[k] = -np.sum(B[rows, cols] * vals)
 
-        return g
+        return f, g
 
-    x0 = np.zeros(m, dtype=np.float64)
+    def lbfgs_two_loop(g, s_history, y_history):
+        """L-BFGS two-loop recursion to compute search direction."""
+        q = g.copy()
+        history_len = len(s_history)
+
+        if history_len == 0:
+            # No history yet, use steepest descent
+            return -g
+
+        alphas = []
+        rhos = []
+
+        # First loop (backward)
+        for i in range(history_len - 1, -1, -1):
+            s_i = s_history[i]
+            y_i = y_history[i]
+            rho_i = 1.0 / (np.dot(y_i, s_i) + 1e-10)
+            rhos.insert(0, rho_i)
+            alpha_i = rho_i * np.dot(s_i, q)
+            alphas.insert(0, alpha_i)
+            q = q - alpha_i * y_i
+
+        # Scaling: H0 = gamma * I where gamma = (s'y)/(y'y)
+        s_last = s_history[-1]
+        y_last = y_history[-1]
+        gamma = np.dot(s_last, y_last) / (np.dot(y_last, y_last) + 1e-10)
+        r = gamma * q
+
+        # Second loop (forward)
+        for i in range(history_len):
+            s_i = s_history[i]
+            y_i = y_history[i]
+            beta_i = rhos[i] * np.dot(y_i, r)
+            r = r + (alphas[i] - beta_i) * s_i
+
+        return -r  # Search direction (negative for minimization)
+
+    # Initialize
+    x = np.zeros(m, dtype=np.float64)
+    f, g = objective_and_gradient(x)
+
+    s_history = deque(maxlen=history_size)
+    y_history = deque(maxlen=history_size)
+
+    converged = False
+    message = "max iterations reached"
 
     if verbose:
         print(f"  L-BFGS general: n={n}, m={m}, starting optimization...")
+        print(f"  iter 0: f={f:.6f}, |g|={np.linalg.norm(g):.2e}")
 
-    # Bounds: x_k >= 0 (coefficients must be non-negative for C to be in cone)
-    bounds = [(0, None)] * m
+    for iteration in range(max_iter):
+        # Check convergence
+        g_norm = np.linalg.norm(g)
+        if g_norm < tol:
+            converged = True
+            message = "gradient norm converged"
+            break
 
-    result = minimize(
-        objective,
-        x0,
-        method='L-BFGS-B',
-        jac=gradient,
-        bounds=bounds,
-        options={
-            'maxiter': max_iter,
-            'gtol': tol,
-            'ftol': ftol,
-            'maxcor': history_size,
-            'maxls': 50,  # More line search evaluations
-            'disp': verbose,
-        }
-    )
+        # Compute search direction using L-BFGS
+        d = lbfgs_two_loop(g, list(s_history), list(y_history))
+
+        # Armijo backtracking line search
+        step = 1.0
+        f_old = f
+        directional_deriv = np.dot(g, d)
+
+        if directional_deriv >= 0:
+            # Not a descent direction, use steepest descent
+            d = -g
+            directional_deriv = -g_norm**2
+
+        for bt in range(max_backtracks):
+            x_new = x + step * d
+            f_new, g_new = objective_and_gradient(x_new)
+
+            # Armijo condition: f_new <= f + c1 * step * g'd
+            if f_new <= f + armijo_c1 * step * directional_deriv:
+                break
+            step *= backtracking_factor
+        else:
+            # Line search failed
+            message = f"line search failed at iter {iteration}"
+            break
+
+        # Update history
+        s = x_new - x
+        y = g_new - g
+
+        # Only add to history if curvature is positive (y's > 0)
+        if np.dot(y, s) > 1e-10:
+            s_history.append(s)
+            y_history.append(y)
+
+        # Update state
+        x = x_new
+        f = f_new
+        g = g_new
+
+        # Check function tolerance
+        if abs(f_old - f) / max(abs(f_old), abs(f), 1.0) < ftol:
+            converged = True
+            message = "function tolerance converged"
+            break
+
+        if verbose and (iteration + 1) % 10 == 0:
+            print(f"  iter {iteration+1}: f={f:.6f}, |g|={np.linalg.norm(g):.2e}, step={step:.2e}")
 
     t_total = time.time() - t_start
 
+    if verbose:
+        print(f"  L-BFGS general: {iteration+1} iters, {t_total:.2f}s, converged={converged}")
+
     # Compute final B and C
-    x = result.x
     C = build_C(x)
     M = Lambda - C
     B = np.linalg.inv(M)
 
     info = {
-        'iters': result.nit,
+        'iters': iteration + 1,
         'time': t_total,
-        'converged': result.success,
-        'method': 'lbfgs-general',
-        'message': result.message,
+        'converged': converged,
+        'method': 'lbfgs-general-custom',
+        'message': message,
     }
-
-    if verbose:
-        print(f"  L-BFGS general: {result.nit} iters, {t_total:.2f}s, converged={result.success}")
 
     return B, C, x, info
 
