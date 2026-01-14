@@ -1607,15 +1607,22 @@ if __name__ == "__main__":
                 Sigma = spd_mixed_fbm(N, H=H, alpha=alpha, delta_t=delta_t)
 
             cond = np.linalg.cond(Sigma)
+            ill_conditioned = cond > max_cond
 
-            if cond > max_cond:
+            # For fbm: full strategy uses A_diff (well-conditioned), only markovian needs Lambda
+            # For mixed_fbm: all strategies need Lambda, so skip if ill-conditioned
+            if ill_conditioned and model_type != "fbm":
                 print(f"  SKIPPED: cond(Sigma)={cond:.2e} > {max_cond:.0e}")
                 n_skipped_cond += 1
                 continue
 
-            Lambda = spd_inverse(Sigma) if is_spd(Sigma) else None
-            if Lambda is None:
-                print(f"  SKIPPED: Sigma not SPD")
+            # Compute Lambda only if needed and well-conditioned
+            Lambda = None
+            if not ill_conditioned and is_spd(Sigma):
+                Lambda = spd_inverse(Sigma)
+
+            if Lambda is None and model_type != "fbm":
+                print(f"  SKIPPED: Sigma not SPD or ill-conditioned")
                 n_skipped_cond += 1
                 continue
 
@@ -1625,24 +1632,28 @@ if __name__ == "__main__":
 
             if model_type == "fbm":
                 # === Pure fBM: 2 strategies (markovian, full) ===
-                # Markovian strategy
+                # Markovian strategy (needs Lambda, skip if ill-conditioned)
                 if run_markovian:
-                    v_markov, info = invest_value_fbm(
-                        H=H, n=n, strategy="markovian", method=method,
-                        Sigma=Sigma, Lambda=Lambda, basis=basis_markov,
-                        tol=1e-6, verbose=False
-                    )
-                    if info["error"]:
-                        print(f"  Markovian: FAILED - {info['error']}")
+                    if ill_conditioned or Lambda is None:
+                        print(f"  Markovian: SKIPPED (cond={cond:.2e} > {max_cond:.0e})")
                         v_markov = np.nan
                     else:
-                        print(f"  Markovian: {v_markov:.6f} ({info['time']:.2f}s, {info['iters']} iters)")
+                        v_markov, info = invest_value_fbm(
+                            H=H, n=n, strategy="markovian", method=method,
+                            Sigma=Sigma, Lambda=Lambda, basis=basis_markov,
+                            tol=1e-6, verbose=False
+                        )
+                        if info["error"]:
+                            print(f"  Markovian: FAILED - {info['error']}")
+                            v_markov = np.nan
+                        else:
+                            print(f"  Markovian: {v_markov:.6f} ({info['time']:.2f}s, {info['iters']} iters)")
 
-                # Full strategy (closed-form for pure fbm)
+                # Full strategy (closed-form using A_diff - always well-conditioned!)
                 if run_full:
                     v_full, info = invest_value_fbm(
                         H=H, n=n, strategy="full", method=method,
-                        Sigma=Sigma, Lambda=Lambda
+                        Sigma=None, Lambda=None  # Not needed for full strategy
                     )
                     if info["error"]:
                         print(f"  Full: FAILED - {info['error']}")
