@@ -1996,16 +1996,21 @@ def solve_lbfgs_general(Lambda, basis, tol=1e-8, max_iter=500, history_size=10, 
     if verbose:
         print(f"  L-BFGS general: n={n}, m={m}, starting optimization...")
 
+    # Bounds: x_k >= 0 (coefficients must be non-negative for C to be in cone)
+    bounds = [(0, None)] * m
+
     result = minimize(
         objective,
         x0,
         method='L-BFGS-B',
         jac=gradient,
+        bounds=bounds,
         options={
             'maxiter': max_iter,
             'gtol': tol,
             'ftol': ftol,
             'maxcor': history_size,
+            'maxls': 50,  # More line search evaluations
             'disp': verbose,
         }
     )

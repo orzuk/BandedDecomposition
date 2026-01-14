@@ -698,24 +698,22 @@ def invest_value_mixed_fbm_blocked(H, N, alpha, delta_t, strategy, method="newto
                 else:
                     raise ValueError(f"Unknown strategy: {strategy}")
 
+            # L-BFGS general doesn't work well for this problem (constraint handling issues)
+            # Fall back to newton-cg for reliable convergence
+            actual_method = "newton-cg" if method == "lbfgs" else method
+            if method == "lbfgs" and verbose:
+                print(f"  Note: L-BFGS not supported for this solver, using newton-cg")
+
+            B, _, x, decomp_info = constrained_decomposition(
+                A=Lambda, basis=basis, method=actual_method,
+                tol=tol, max_iter=max_iter, verbose=verbose, return_info=True,
+                x_init=x_init
+            )
+            info["iters"] = decomp_info["iters"]
+            info["method"] = decomp_info.get("used_method", actual_method)
             if method == "lbfgs":
-                # Use general L-BFGS
-                from toeplitz_solver import solve_lbfgs_general
-                B, _, x, decomp_info = solve_lbfgs_general(
-                    Lambda, basis, tol=tol, max_iter=max_iter, verbose=verbose
-                )
-                info["iters"] = decomp_info["iters"]
-                info["method"] = "lbfgs-general"
-                info["x"] = x
-            else:
-                B, _, x, decomp_info = constrained_decomposition(
-                    A=Lambda, basis=basis, method=method,
-                    tol=tol, max_iter=max_iter, verbose=verbose, return_info=True,
-                    x_init=x_init
-                )
-                info["iters"] = decomp_info["iters"]
-                info["method"] = decomp_info.get("used_method", method)
-                info["x"] = x
+                info["method"] += " (lbfgs fallback)"
+            info["x"] = x
 
         # === Step 5: Compute log|B| and final value ===
         _, log_det_B = np.linalg.slogdet(B)
@@ -852,24 +850,22 @@ def invest_value_fbm(H, n, strategy, method="newton", Sigma=None, Lambda=None, b
             if basis is None:
                 basis = TridiagC_Basis(n)
 
+            # L-BFGS general doesn't work well for this problem (constraint handling issues)
+            # Fall back to newton-cg for reliable convergence
+            actual_method = "newton-cg" if method == "lbfgs" else method
+            if method == "lbfgs" and verbose:
+                print(f"  Note: L-BFGS not supported for fbm solver, using newton-cg")
+
+            B, _, x, decomp_info = constrained_decomposition(
+                A=Lambda, basis=basis, method=actual_method,
+                tol=tol, max_iter=max_iter, verbose=verbose, return_info=True,
+                x_init=x_init
+            )
+            info["iters"] = decomp_info["iters"]
+            info["method"] = decomp_info.get("used_method", actual_method)
             if method == "lbfgs":
-                # Use general L-BFGS
-                from toeplitz_solver import solve_lbfgs_general
-                B, _, x, decomp_info = solve_lbfgs_general(
-                    Lambda, basis, tol=tol, max_iter=max_iter, verbose=verbose
-                )
-                info["iters"] = decomp_info["iters"]
-                info["method"] = "lbfgs-general"
-                info["x"] = x
-            else:
-                B, _, x, decomp_info = constrained_decomposition(
-                    A=Lambda, basis=basis, method=method,
-                    tol=tol, max_iter=max_iter, verbose=verbose, return_info=True,
-                    x_init=x_init
-                )
-                info["iters"] = decomp_info["iters"]
-                info["method"] = decomp_info.get("used_method", method)
-                info["x"] = x
+                info["method"] += " (lbfgs fallback)"
+            info["x"] = x
         else:
             raise ValueError(f"Unknown strategy for fbm: {strategy}")
 
@@ -1029,15 +1025,19 @@ def invest_value_mixed_fbm(H, N, alpha, delta_t, strategy, method="newton", solv
                 info["method"] = "lbfgs"
                 info["x"] = x
             elif method == "lbfgs":
-                # Use general L-BFGS for full strategy or any other basis
-                from toeplitz_solver import solve_lbfgs_general
+                # L-BFGS only works for markovian strategy (handled above)
+                # For full strategy, fall back to newton-cg (L-BFGS fails due to constraint handling)
+                if verbose:
+                    print(f"  Note: L-BFGS not supported for {strategy} strategy, using newton-cg")
                 t0 = time.time()
-                B, _, x, solve_info = solve_lbfgs_general(
-                    Lambda, basis, tol=tol, max_iter=max_iter, verbose=verbose
+                B, _, x, decomp_info = constrained_decomposition(
+                    A=Lambda, basis=basis, method="newton-cg",
+                    tol=tol, max_iter=max_iter, verbose=verbose, return_info=True,
+                    x_init=x_init
                 )
                 t_solve = time.time() - t0
-                info["iters"] = solve_info["iters"]
-                info["method"] = "lbfgs-general"
+                info["iters"] = decomp_info["iters"]
+                info["method"] = "newton-cg (lbfgs fallback)"
                 info["x"] = x
             else:
                 t0 = time.time()
