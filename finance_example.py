@@ -698,13 +698,16 @@ def invest_value_mixed_fbm_blocked(H, N, alpha, delta_t, strategy, method="newto
                 else:
                     raise ValueError(f"Unknown strategy: {strategy}")
 
+            # Fall back to newton-cg if lbfgs requested (not supported by constrained_decomposition)
+            decomp_method = "newton-cg" if method == "lbfgs" else method
+
             B, _, x, decomp_info = constrained_decomposition(
-                A=Lambda, basis=basis, method=method,
+                A=Lambda, basis=basis, method=decomp_method,
                 tol=tol, max_iter=max_iter, verbose=verbose, return_info=True,
                 x_init=x_init
             )
             info["iters"] = decomp_info["iters"]
-            info["method"] = decomp_info.get("used_method", method)
+            info["method"] = decomp_info.get("used_method", decomp_method)
             info["x"] = x
 
         # === Step 5: Compute log|B| and final value ===
@@ -842,8 +845,11 @@ def invest_value_fbm(H, n, strategy, method="newton", Sigma=None, Lambda=None, b
             if basis is None:
                 basis = TridiagC_Basis(n)
 
+            # Fall back to newton-cg if lbfgs requested (not supported by constrained_decomposition)
+            decomp_method = "newton-cg" if method == "lbfgs" else method
+
             B, _, x, decomp_info = constrained_decomposition(
-                A=Lambda, basis=basis, method=method,
+                A=Lambda, basis=basis, method=decomp_method,
                 tol=tol, max_iter=max_iter, verbose=verbose, return_info=True,
                 x_init=x_init
             )
@@ -1009,15 +1015,17 @@ def invest_value_mixed_fbm(H, N, alpha, delta_t, strategy, method="newton", solv
                 info["method"] = "lbfgs"
                 info["x"] = x
             else:
+                # Fall back to newton-cg if lbfgs requested (not supported by constrained_decomposition)
+                decomp_method = "newton-cg" if method == "lbfgs" else method
                 t0 = time.time()
                 B, _, x, decomp_info = constrained_decomposition(
-                    A=Lambda, basis=basis, method=method,
+                    A=Lambda, basis=basis, method=decomp_method,
                     tol=tol, max_iter=max_iter, verbose=verbose, return_info=True,
                     x_init=x_init
                 )
                 t_solve = time.time() - t0
                 info["iters"] = decomp_info["iters"]
-                info["method"] = decomp_info.get("used_method", method)
+                info["method"] = decomp_info.get("used_method", decomp_method)
                 info["x"] = x  # Return for warm starting next iteration
 
         # === Step 5: Compute log|B| and final value (shared formula) ===
