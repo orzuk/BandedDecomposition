@@ -1,0 +1,236 @@
+%% Created by Maple 2023.1, Windows 11
+%% Source Worksheet: ContinuousLimitRecurrence.mw
+%% Generated: Sun Aug 13 23:13:16 IDT 2023
+\documentclass{article}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{mathtools}
+\usepackage{maple}
+\usepackage[utf8]{inputenc}
+\usepackage[svgnames]{xcolor}
+\usepackage{amsmath}
+\usepackage{breqn}
+\usepackage{textcomp}
+\begin{document}
+\lstset{basicstyle=\ttfamily,breaklines=true,columns=flexible}
+\pagestyle{empty}
+\DefineParaStyle{Maple Bullet Item}
+\DefineParaStyle{Maple Heading 1}
+\DefineParaStyle{Maple Warning}
+\DefineParaStyle{Maple Heading 4}
+\DefineParaStyle{Maple Heading 2}
+\DefineParaStyle{Maple Heading 3}
+\DefineParaStyle{Maple Dash Item}
+\DefineParaStyle{Maple Error}
+\DefineParaStyle{Maple Title}
+\DefineParaStyle{Maple Ordered List 1}
+\DefineParaStyle{Maple Text Output}
+\DefineParaStyle{Maple Ordered List 2}
+\DefineParaStyle{Maple Ordered List 3}
+\DefineParaStyle{Maple Normal}
+\DefineParaStyle{Maple Ordered List 4}
+\DefineParaStyle{Maple Ordered List 5}
+\DefineCharStyle{Maple 2D Output}
+\DefineCharStyle{Maple 2D Input}
+\DefineCharStyle{Maple Maple Input}
+\DefineCharStyle{Maple 2D Math}
+\DefineCharStyle{Maple Hyperlink}
+\mapleinput
+{$ \displaystyle \texttt{>\,} B \coloneqq \mathit{Matrix} (10); $}
+
+% \mapleresult
+\begin{dmath}\label{(1)}
+B \coloneqq 
+\\
+\left[\begin{array}{cccccccccc}
+0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 
+\\
+ 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 
+\\
+ 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 
+\\
+ 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 
+\\
+ 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 
+\\
+ 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 
+\\
+ 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 
+\\
+ 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 
+\\
+ 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 
+\\
+ 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 
+\end{array}\right]
+\end{dmath}
+% \mapleresult
+\mapleinput
+{$ \displaystyle \texttt{>\,} \mathrm{for}\,k \,\mathrm{from}\,1\,\mathrm{to}\,9\,\mathrm{do}\, \,B [k +1,1]\coloneqq -\mathrm{alpha}\colon 
+\\
+ \,\mathrm{for}\,j \,\mathrm{from}\,1\,\mathrm{to}\,k \,\mathrm{do}\, \,B [k +1,1]\coloneqq B [k +1,1]-\frac{B [k ,j]\cdot (-1)^{j -1}\cdot \mathrm{factorial}(j -1)}{\alpha^{j -1}}\colon 
+\\
+ \,\mathrm{end}\,\mathrm{do};
+\\
+  \,\mathrm{for}\,i \,\mathrm{from}\,1\,\mathrm{to}\,k \,\mathrm{do} \,\mathrm{for}\,j \,\mathrm{from}\,i \,\mathrm{to}\,k \,\mathrm{do} \,B [k +1,1]\coloneqq B [k +1,1]+\exp (\mathrm{alpha}\cdot d)\cdot d^{i -1}\,\frac{B [k ,j]\cdot (-1)^{j -i}\cdot \mathrm{factorial}(j -1)}{\mathrm{factorial}(i -1)\cdot \,\alpha^{j -i}}\colon 
+\\
+ \,\mathrm{end}\,\mathrm{do};
+\\
+ \,\mathrm{end}\,\mathrm{do};
+\\
+ \,\mathrm{for}\,j \,\mathrm{from}\,2\,\mathrm{to}\,9\,\mathrm{do} \,B [k +1,j]\coloneqq \mathit{simplify} (\frac{-B [k ,j -1]\cdot \mathrm{alpha}}{j -1})\colon 
+\\
+ \,\mathrm{end}\,\mathrm{do};
+\\
+ \,B [k +1,1]\coloneqq \mathit{simplify} (B [k +1,1]);
+\\
+ \,\mathit{print} (k ,B [k +1,1]);
+\\
+ \,\mathrm{end}\,\mathrm{do}\colon  $}
+
+% \mapleresult
+\begin{dmath*}
+1,-\alpha 
+\end{dmath*}
+\vspace{-\bigskipamount}
+% \mapleresult
+\begin{dmath*}
+2,-{\mathrm e}^{\alpha  d} \alpha 
+\end{dmath*}
+\vspace{-\bigskipamount}
+% \mapleresult
+\begin{dmath*}
+3,{\mathrm e}^{\alpha  d} \alpha  (\alpha  d -{\mathrm e}^{\alpha  d})
+\end{dmath*}
+\vspace{-\bigskipamount}
+% \mapleresult
+\begin{dmath*}
+4,\frac{{\mathrm e}^{\alpha  d} \alpha  (-d^{2} \alpha^{2}+4 \,{\mathrm e}^{\alpha  d} d \alpha -2 \,{\mathrm e}^{2 \alpha  d})}{2}
+\end{dmath*}
+\vspace{-\bigskipamount}
+% \mapleresult
+\begin{dmath*}
+5,\frac{{\mathrm e}^{\alpha  d} (-6 \,{\mathrm e}^{3 \alpha  d}+(18 \,{\mathrm e}^{2 \alpha  d}+\alpha  d (\alpha  d -12 \,{\mathrm e}^{\alpha  d})) \alpha  d) \alpha}{6}
+\end{dmath*}
+\vspace{-\bigskipamount}
+% \mapleresult
+\begin{dmath*}
+6,-\frac{{\mathrm e}^{\alpha  d} \alpha  (d^{4} \alpha^{4}-32 \,{\mathrm e}^{\alpha  d} d^{3} \alpha^{3}+108 \,{\mathrm e}^{2 \alpha  d} d^{2} \alpha^{2}-96 d \alpha  \,{\mathrm e}^{3 \alpha  d}+24 \,{\mathrm e}^{4 \alpha  d})}{24}
+\end{dmath*}
+\vspace{-\bigskipamount}
+% \mapleresult
+\begin{dmath*}
+7,\frac{{\mathrm e}^{\alpha  d} \alpha  (-120 \,{\mathrm e}^{5 \alpha  d}+\alpha  d (d^{4} \alpha^{4}-80 \,{\mathrm e}^{\alpha  d} d^{3} \alpha^{3}+540 \,{\mathrm e}^{2 \alpha  d} d^{2} \alpha^{2}-960 d \alpha  \,{\mathrm e}^{3 \alpha  d}+600 \,{\mathrm e}^{4 \alpha  d}))}{120}
+\end{dmath*}
+\vspace{-\bigskipamount}
+% \mapleresult
+\begin{dmath*}
+8,-\frac{(720 \,{\mathrm e}^{6 \alpha  d}+\alpha  d (d^{5} \alpha^{5}-192 \,{\mathrm e}^{\alpha  d} d^{4} \alpha^{4}+2430 \,{\mathrm e}^{2 \alpha  d} d^{3} \alpha^{3}-7680 \alpha^{2} d^{2} {\mathrm e}^{3 \alpha  d}+9000 \alpha  d \,{\mathrm e}^{4 \alpha  d}-4320 \,{\mathrm e}^{5 \alpha  d})) {\mathrm e}^{\alpha  d} \alpha}{720}
+\end{dmath*}
+\vspace{-\bigskipamount}
+% \mapleresult
+\begin{dmath}\label{(3)}
+9,\frac{{\mathrm e}^{\alpha  d} \alpha  \left(-5040 \,{\mathrm e}^{7 \alpha  d}+\alpha  d \left(d^{6} \alpha^{6}-448 \,{\mathrm e}^{\alpha  d} \alpha^{5} d^{5}+10206 \,{\mathrm e}^{2 \alpha  d} d^{4} \alpha^{4}-53760 d^{3} \alpha^{3} {\mathrm e}^{3 \alpha  d}+105000 \alpha^{2} d^{2} {\mathrm e}^{4 \alpha  d}-90720 \alpha  d \,{\mathrm e}^{5 \alpha  d}+35280 \,{\mathrm e}^{6 \alpha  d}\right)\right)}{5040}
+\end{dmath}
+\mapleinput
+{$ \displaystyle \texttt{>\,}  $}
+
+\mapleinput
+{$ \displaystyle \texttt{>\,} C =\,\mathit{Vector} (10);\,C [1]\coloneqq -\mathrm{alpha}; $}
+
+% \mapleresult
+\begin{dmath*}
+C =\left[\begin{array}{c}
+0 
+\\
+ 0 
+\\
+ 0 
+\\
+ 0 
+\\
+ 0 
+\\
+ 0 
+\\
+ 0 
+\\
+ 0 
+\\
+ 0 
+\\
+ 0 
+\end{array}\right]
+\end{dmath*}
+\vspace{-\bigskipamount}
+% \mapleresult
+\begin{dmath}\label{(4)}
+C_{1}\coloneqq -\alpha 
+\end{dmath}
+\mapleinput
+{$ \displaystyle \texttt{>\,} \mathrm{for}\,k \,\mathrm{from}\,1\,\mathrm{to}\,9\,\mathrm{do}\, \,C [k +1]\coloneqq -\mathrm{alpha}\colon 
+\\
+ \,\mathrm{for}\,j \,\mathrm{from}\,1\,\mathrm{to}\,k \,\mathrm{do} \,C [k +1]\coloneqq C [k +1]-C [j];
+\\
+ \,\mathrm{for}\,i \,\mathrm{from}\,0\,\mathrm{to}\,k -j \,\mathrm{do} \,C [k +1]\coloneqq C [k +1]+\frac{C [j]\,\cdot (-\mathrm{alpha}\cdot d)^{i}}{\mathrm{factorial}(i)}\cdot \exp (\mathrm{alpha}\cdot d)\colon 
+\\
+ \,\mathrm{end}\,\mathrm{do}\colon 
+\\
+ \,\mathrm{end}\,\mathrm{do}\colon 
+\\
+ \,C [k +1]\coloneqq \mathit{simplify} (C [k +1])\colon 
+\\
+ \,\mathit{print} (k +1,C [k +1]);
+\\
+ \,\mathrm{end}\,\mathrm{do}\colon  $}
+
+% \mapleresult
+\begin{dmath*}
+2,-{\mathrm e}^{\alpha  d} \alpha 
+\end{dmath*}
+\vspace{-\bigskipamount}
+% \mapleresult
+\begin{dmath*}
+3,{\mathrm e}^{\alpha  d} \alpha  (\alpha  d -{\mathrm e}^{\alpha  d})
+\end{dmath*}
+\vspace{-\bigskipamount}
+% \mapleresult
+\begin{dmath*}
+4,\frac{{\mathrm e}^{\alpha  d} \alpha  (-d^{2} \alpha^{2}+4 \,{\mathrm e}^{\alpha  d} d \alpha -2 \,{\mathrm e}^{2 \alpha  d})}{2}
+\end{dmath*}
+\vspace{-\bigskipamount}
+% \mapleresult
+\begin{dmath*}
+5,\frac{{\mathrm e}^{\alpha  d} (-6 \,{\mathrm e}^{3 \alpha  d}+(18 \,{\mathrm e}^{2 \alpha  d}+\alpha  d (\alpha  d -12 \,{\mathrm e}^{\alpha  d})) \alpha  d) \alpha}{6}
+\end{dmath*}
+\vspace{-\bigskipamount}
+% \mapleresult
+\begin{dmath*}
+6,-\frac{{\mathrm e}^{\alpha  d} \alpha  (d^{4} \alpha^{4}-32 \,{\mathrm e}^{\alpha  d} d^{3} \alpha^{3}+108 \,{\mathrm e}^{2 \alpha  d} d^{2} \alpha^{2}-96 d \alpha  \,{\mathrm e}^{3 \alpha  d}+24 \,{\mathrm e}^{4 \alpha  d})}{24}
+\end{dmath*}
+\vspace{-\bigskipamount}
+% \mapleresult
+\begin{dmath*}
+7,\frac{{\mathrm e}^{\alpha  d} \alpha  (-120 \,{\mathrm e}^{5 \alpha  d}+\alpha  d (d^{4} \alpha^{4}-80 \,{\mathrm e}^{\alpha  d} d^{3} \alpha^{3}+540 \,{\mathrm e}^{2 \alpha  d} d^{2} \alpha^{2}-960 d \alpha  \,{\mathrm e}^{3 \alpha  d}+600 \,{\mathrm e}^{4 \alpha  d}))}{120}
+\end{dmath*}
+\vspace{-\bigskipamount}
+% \mapleresult
+\begin{dmath*}
+8,-\frac{(720 \,{\mathrm e}^{6 \alpha  d}+\alpha  d (d^{5} \alpha^{5}-192 \,{\mathrm e}^{\alpha  d} d^{4} \alpha^{4}+2430 \,{\mathrm e}^{2 \alpha  d} d^{3} \alpha^{3}-7680 \alpha^{2} d^{2} {\mathrm e}^{3 \alpha  d}+9000 \alpha  d \,{\mathrm e}^{4 \alpha  d}-4320 \,{\mathrm e}^{5 \alpha  d})) {\mathrm e}^{\alpha  d} \alpha}{720}
+\end{dmath*}
+\vspace{-\bigskipamount}
+% \mapleresult
+\begin{dmath*}
+9,\frac{{\mathrm e}^{\alpha  d} \alpha  (-5040 \,{\mathrm e}^{7 \alpha  d}+\alpha  d (d^{6} \alpha^{6}-448 \,{\mathrm e}^{\alpha  d} \alpha^{5} d^{5}+10206 \,{\mathrm e}^{2 \alpha  d} d^{4} \alpha^{4}-53760 d^{3} \alpha^{3} {\mathrm e}^{3 \alpha  d}+105000 \alpha^{2} d^{2} {\mathrm e}^{4 \alpha  d}-90720 \alpha  d \,{\mathrm e}^{5 \alpha  d}+35280 \,{\mathrm e}^{6 \alpha  d}))}{5040}
+\end{dmath*}
+\vspace{-\bigskipamount}
+% \mapleresult
+\begin{dmath}\label{(5)}
+10,-\frac{{\mathrm e}^{\alpha  d} \alpha  \left(40320 \,{\mathrm e}^{8 \alpha  d}+\alpha  d \left(d^{7} \alpha^{7}-1024 \,{\mathrm e}^{\alpha  d} \alpha^{6} d^{6}+40824 \,{\mathrm e}^{2 \alpha  d} d^{5} \alpha^{5}-344064 d^{4} \alpha^{4} {\mathrm e}^{3 \alpha  d}+1050000 d^{3} \alpha^{3} {\mathrm e}^{4 \alpha  d}-1451520 \alpha^{2} d^{2} {\mathrm e}^{5 \alpha  d}+987840 \alpha  d \,{\mathrm e}^{6 \alpha  d}-322560 \,{\mathrm e}^{7 \alpha  d}\right)\right)}{40320}
+\end{dmath}
+\mapleinput
+{$ \displaystyle \texttt{>\,}  $}
+
+\end{document}

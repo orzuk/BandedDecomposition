@@ -1379,7 +1379,7 @@ if __name__ == "__main__":
                         help="Matrix dimension (default: 100). For mixed_fbm, N=n//2 time steps.")
     parser.add_argument("--solver", type=str, choices=["primal", "dual"], default="primal",
                         help="Solver for full-info: 'primal' or 'dual' (Newton on S⊥)")
-    parser.add_argument("--method", type=str, choices=["newton", "newton-cg", "quasi-newton", "lbfgs"], default="lbfgs",
+    parser.add_argument("--method", type=str, choices=["newton", "newton-cg", "quasi-newton", "lbfgs"], default="newton-cg",
                         help="Optimization method: 'newton' (auto-switches to newton-cg for large m), "
                              "'newton-cg' (matrix-free), 'quasi-newton' (BFGS), or 'lbfgs' (L-BFGS, fastest for large N)")
     parser.add_argument("--strategy", type=str, choices=["both", "markovian", "full"], default="both",

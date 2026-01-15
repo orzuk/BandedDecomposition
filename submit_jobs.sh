@@ -133,7 +133,7 @@ python finance_example.py \\
     --n ${n} \\
     ${alpha_arg} \\
     --strategy ${strategy} \\
-    --method lbfgs \\
+    --method newton-cg \\
     --hmin ${HMIN} \\
     --hmax ${HMAX} \\
     --hres ${HRES} \\
