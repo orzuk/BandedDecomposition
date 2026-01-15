@@ -164,6 +164,19 @@ class SymBasis:
     def is_sparse_coo(self) -> bool:
         return self._coo is not None
 
+    def mat(self, k):
+        """Return the k-th basis matrix D_k as a dense array."""
+        if self._dense is not None:
+            return self._dense[k]
+        elif self._coo is not None:
+            rows, cols, vals = self._coo[k]
+            n = self.n
+            D = np.zeros((n, n), dtype=float)
+            D[rows, cols] = vals
+            return D
+        else:
+            raise ValueError("No basis matrices available")
+
     def _precompute_concat_coo(self):
         """
         Precompute concatenated COO arrays for fast coo_linear_combo.
@@ -1411,8 +1424,87 @@ class TridiagC_Basis(SymBasis):
             g[k] = B[k, k] - B[k, k + 1]
         return g
 
+    def mat(self, k):
+        """Return the k-th basis matrix D_k."""
+        n = self.n
+        D = np.zeros((n, n), dtype=float)
+        D[k, k] = 1.0
+        D[k, k + 1] = -0.5
+        D[k + 1, k] = -0.5
+        return D
+
     def hessian_from_B(self, B):
         return hessian_phi_spd_from_B(B)
+
+class TridiagBasis(SymBasis):
+    """
+    General symmetric tridiagonal basis with 2n-1 parameters:
+    - n diagonal parameters (k = 0, ..., n-1)
+    - n-1 off-diagonal parameters (k = n, ..., 2n-2)
+
+    B[i,i] = x[i] for i = 0, ..., n-1
+    B[i,i+1] = B[i+1,i] = x[n+i] for i = 0, ..., n-2
+
+    This basis can represent any symmetric tridiagonal matrix.
+    """
+
+    def __init__(self, n):
+        if n < 2:
+            raise ValueError("n must be >= 2.")
+        self.n = int(n)
+        self.m = 2 * n - 1  # n diagonal + (n-1) off-diagonal
+        self.name = "tridiag_general"
+        self._dense = None
+        self._coo = None
+
+    def build_C(self, x):
+        """Build tridiagonal matrix from parameters."""
+        x = np.asarray(x, dtype=float)
+        if x.shape != (self.m,):
+            raise ValueError(f"x must have shape ({self.m},)")
+        n = self.n
+        B = np.zeros((n, n), dtype=float)
+        # Diagonal elements
+        for i in range(n):
+            B[i, i] = x[i]
+        # Off-diagonal elements
+        for i in range(n - 1):
+            B[i, i + 1] = x[n + i]
+            B[i + 1, i] = x[n + i]
+        return B
+
+    def trace_with(self, M):
+        """Compute tr(M * D_k) for each basis matrix D_k."""
+        M = np.asarray(M, dtype=float)
+        n = self.n
+        g = np.empty(self.m, dtype=float)
+        # Diagonal: g[i] = M[i,i]
+        for i in range(n):
+            g[i] = M[i, i]
+        # Off-diagonal: g[n+i] = 2 * M[i,i+1] (symmetric)
+        for i in range(n - 1):
+            g[n + i] = 2.0 * M[i, i + 1]
+        return g
+
+    def mat(self, k):
+        """Return the k-th basis matrix D_k."""
+        n = self.n
+        D = np.zeros((n, n), dtype=float)
+        if k < n:
+            # Diagonal basis element
+            D[k, k] = 1.0
+        else:
+            # Off-diagonal basis element
+            i = k - n
+            D[i, i + 1] = 1.0
+            D[i + 1, i] = 1.0
+        return D
+
+    def hessian_from_B(self, B):
+        """Fast Hessian computation for tridiagonal case."""
+        # Use generic method (can be optimized later)
+        return self.generic_hessian_from_B(B)
+
 
 def hessian_phi_spd_from_B(B):
     """
@@ -2149,6 +2241,253 @@ def project_onto_subspace(M, basis: SymBasis, gram_inv=None):
     for k in range(m):
         P += coeffs[k] * Dmats[k]
     return P, coeffs
+
+
+def constrained_decomposition_direct(
+    Sigma,
+    basis: SymBasis,
+    tol=1e-8,
+    max_iter=500,
+    method="newton",
+    verbose=False,
+    newton_damping=1e-10,
+    max_backtracks=60,
+    log_prefix="",
+    return_info=False,
+    barrier_mu=1e-6,
+    x_init=None,
+    max_m_for_full_hessian=2000,
+):
+    """
+    Direct barrier method for constrained decomposition.
+
+    Solves:
+        maximize   log det(B)
+        subject to Sigma - B ≽ 0
+                   B ≻ 0
+                   B ∈ S (linear subspace spanned by basis)
+
+    Unlike constrained_decomposition which requires Sigma^{-1}, this method
+    works directly with Sigma and uses a log-det barrier for Sigma - B.
+    This is numerically stable even when Sigma is ill-conditioned.
+
+    Barrier objective:
+        phi(B) = -log det(B) - mu * log det(Sigma - B)
+
+    Parameters
+    ----------
+    Sigma : ndarray
+        The SPD constraint matrix (covariance matrix).
+    basis : SymBasis
+        Basis spanning the constraint subspace S.
+    barrier_mu : float
+        Barrier parameter (default 1e-6). Smaller = closer to optimal.
+
+    Returns
+    -------
+    B : ndarray
+        Optimal B in S.
+    C : ndarray
+        Sigma - B (the slack matrix).
+    x : ndarray
+        Coefficients such that B = sum_k x_k * D_k.
+    info : dict (if return_info=True)
+        Solver statistics.
+    """
+    Sigma = np.asarray(Sigma, dtype=float)
+    n = Sigma.shape[0]
+    m = basis.m  # dimension of the basis (number of free parameters)
+    mu = barrier_mu
+    pfx = log_prefix
+
+    if verbose:
+        print(f"{pfx}Direct barrier method: n={n}, m={m}, mu={mu:.2e}")
+
+    # Initialize: find feasible B such that B ≺ Sigma and B ≻ 0
+    if x_init is not None:
+        x = np.asarray(x_init, dtype=float).ravel()
+        B = basis.build_C(x)
+    else:
+        # Start with small diagonal matrix (scale * I projected onto S)
+        scale = 0.1 * np.min(np.diag(Sigma))
+        if scale <= 0:
+            scale = 0.01 * np.mean(np.abs(np.diag(Sigma)))
+        if scale <= 0:
+            scale = 0.01
+
+        # Create initial x by projecting scale * I onto the basis
+        # For TridiagBasis: x[0:n] = scale (diagonal), x[n:] = 0 (off-diag)
+        # For general basis: use trace_with to get coefficients
+        I_scaled = scale * np.eye(n)
+        x = basis.trace_with(I_scaled)  # g_k = tr(scale*I * D_k)
+
+        # Normalize by the norm of each basis element
+        for k in range(m):
+            Dk = basis.mat(k)
+            norm_Dk = np.sqrt(np.sum(Dk * Dk))
+            if norm_Dk > 0:
+                x[k] /= norm_Dk
+
+        B = basis.build_C(x)
+
+        # Ensure feasibility: shrink until B ≻ 0 and Sigma - B ≻ 0
+        for shrink_iter in range(30):
+            try:
+                eigB = np.linalg.eigvalsh(B)
+                eigC = np.linalg.eigvalsh(Sigma - B)
+                if np.min(eigB) > 1e-10 and np.min(eigC) > 1e-10:
+                    break
+            except:
+                pass
+            x *= 0.5
+            B = basis.build_C(x)
+        else:
+            # Last resort: start with tiny diagonal only
+            x = np.zeros(m, dtype=float)
+            # Find diagonal basis elements and set them to small positive values
+            for k in range(m):
+                Dk = basis.mat(k)
+                if np.allclose(Dk, np.diag(np.diag(Dk))) and np.any(np.diag(Dk) > 0):
+                    x[k] = 0.001 * np.min(np.diag(Sigma)[np.diag(Dk) > 0])
+            B = basis.build_C(x)
+
+            # Final check
+            try:
+                eigB = np.linalg.eigvalsh(B)
+                eigC = np.linalg.eigvalsh(Sigma - B)
+                if np.min(eigB) <= 0 or np.min(eigC) <= 0:
+                    if verbose:
+                        print(f"{pfx}Warning: Could not find feasible starting point")
+            except:
+                if verbose:
+                    print(f"{pfx}Warning: Initialization failed")
+
+    C = Sigma - B
+
+    def compute_phi_grad(x_curr):
+        """Compute barrier objective and gradient."""
+        B_curr = basis.build_C(x_curr)
+        C_curr = Sigma - B_curr
+
+        # Check feasibility
+        try:
+            L_B = np.linalg.cholesky(B_curr)
+            L_C = np.linalg.cholesky(C_curr)
+        except np.linalg.LinAlgError:
+            return np.inf, None, None, None
+
+        # phi = -log det(B) - mu * log det(C)
+        logdet_B = 2.0 * np.sum(np.log(np.diag(L_B)))
+        logdet_C = 2.0 * np.sum(np.log(np.diag(L_C)))
+        phi = -logdet_B - mu * logdet_C
+
+        # Compute inverses via Cholesky solves
+        I = np.eye(n)
+        B_inv = sp_linalg.cho_solve((L_B, True), I)
+        B_inv = 0.5 * (B_inv + B_inv.T)
+        C_inv = sp_linalg.cho_solve((L_C, True), I)
+        C_inv = 0.5 * (C_inv + C_inv.T)
+
+        # Gradient: g_k = tr([−B^{-1} + mu * C^{-1}] D_k)
+        # Note: D_k = ∂B/∂x_k, so ∂C/∂x_k = -D_k
+        grad_mat = -B_inv + mu * C_inv
+        g = basis.trace_with(grad_mat)
+
+        return phi, g, B_inv, C_inv
+
+    def compute_hessian(B_inv, C_inv):
+        """Compute Hessian matrix."""
+        # H_{k,l} = tr(B^{-1} D_k B^{-1} D_l) + mu * tr(C^{-1} D_k C^{-1} D_l)
+        H = np.zeros((m, m))
+        for k in range(m):
+            Dk = basis.mat(k)
+            BinvDk = B_inv @ Dk
+            CinvDk = C_inv @ Dk
+            for l in range(k, m):
+                Dl = basis.mat(l)
+                BinvDl = B_inv @ Dl
+                CinvDl = C_inv @ Dl
+                H[k, l] = np.sum(BinvDk * BinvDl.T) + mu * np.sum(CinvDk * CinvDl.T)
+                H[l, k] = H[k, l]
+        return H
+
+    # Main optimization loop
+    phi, g, B_inv, C_inv = compute_phi_grad(x)
+    if phi == np.inf:
+        if return_info:
+            return B, C, x, {"iters": 0, "converged": False, "error": "Initial point infeasible"}
+        return B, C, x
+
+    total_backtracks = 0
+    iters_done = 0
+    use_full_newton = (method == "newton" and m <= max_m_for_full_hessian)
+
+    for it in range(max_iter):
+        iters_done = it + 1
+        g_norm = float(np.linalg.norm(g))
+
+        if verbose and it % 10 == 0:
+            print(f"{pfx}iter {it:4d}  phi={phi:.6e}  ||g||={g_norm:.3e}")
+
+        if g_norm < tol:
+            break
+
+        # Compute search direction
+        if use_full_newton:
+            H = compute_hessian(B_inv, C_inv)
+            lam = newton_damping
+            for _ in range(10):
+                try:
+                    H_damped = H + lam * np.eye(m)
+                    L_H = np.linalg.cholesky(H_damped)
+                    d = sp_linalg.cho_solve((L_H, True), -g)
+                    break
+                except np.linalg.LinAlgError:
+                    lam = max(10.0 * lam, 1e-12)
+            else:
+                d = -g  # fall back to gradient descent
+        else:
+            # Gradient descent (for large m)
+            d = -g
+
+        # Line search with backtracking
+        step = 1.0
+        for bt in range(max_backtracks):
+            x_new = x + step * d
+            phi_new, g_new, B_inv_new, C_inv_new = compute_phi_grad(x_new)
+
+            if phi_new < phi + 1e-4 * step * (g @ d):
+                x = x_new
+                phi = phi_new
+                g = g_new
+                B_inv = B_inv_new
+                C_inv = C_inv_new
+                total_backtracks += bt
+                break
+            step *= 0.5
+        else:
+            if verbose:
+                print(f"{pfx}Line search failed at iter {it}")
+            break
+
+    B = basis.build_C(x)
+    C = Sigma - B
+
+    if verbose:
+        print(f"{pfx}Converged in {iters_done} iters, ||g||={float(np.linalg.norm(g)):.2e}")
+
+    if return_info:
+        info = {
+            "iters": iters_done,
+            "backtracks": total_backtracks,
+            "converged": g_norm < tol,
+            "final_grad_norm": float(np.linalg.norm(g)),
+            "used_method": "newton" if use_full_newton else "gradient-descent",
+        }
+        return B, C, x, info
+
+    return B, C, x
+
 
 def constrained_decomposition_dual(
     A,

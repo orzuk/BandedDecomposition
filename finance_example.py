@@ -1,5 +1,5 @@
 from constrained_decomposition_core import *
-from constrained_decomposition_core import make_orthogonal_complement_basis, constrained_decomposition_dual
+from constrained_decomposition_core import make_orthogonal_complement_basis, constrained_decomposition_dual, constrained_decomposition_direct
 from constrained_decomposition_matrices import *
 from constrained_decomposition_matrices import spd_mixed_fbm_blocked, fgn_cov_toeplitz
 from constrained_decomposition_viz import plot_decomposition_heatmaps
@@ -851,18 +851,10 @@ def invest_value_fbm(H, n, strategy, method="newton", Sigma=None, Lambda=None, b
             info["error"] = "Sigma not SPD"
             return np.nan, info
 
-        # === Step 2: Compute precision matrix Lambda ===
-        if Lambda is None:
-            Lambda = spd_inverse(Sigma)
-
-        if not is_spd(Lambda):
-            info["error"] = "Lambda not SPD"
-            return np.nan, info
-
-        # === Step 3: Compute log|Σ| ===
+        # === Step 2: Compute log|Σ| ===
         _, log_det_Sigma = np.linalg.slogdet(Sigma)
 
-        # === Step 4: Compute B (strategy-specific) ===
+        # === Step 3: Compute B (strategy-specific) ===
         if strategy == "full":
             # General strategy: closed-form from differential covariance
             A_diff = spd_fractional_BM(n, H=H, T=1.0, diff_flag=True)
@@ -871,15 +863,21 @@ def invest_value_fbm(H, n, strategy, method="newton", Sigma=None, Lambda=None, b
             info["time"] = time.time() - t_start
             return value, info
         elif strategy == "markovian":
-            # Markovian: constrained decomposition with tridiagonal basis
+            # Markovian: constrained decomposition with TridiagC_Basis
+            # Note: This requires Lambda = Sigma^{-1}. For ill-conditioned Sigma,
+            # the results may be less accurate but we try anyway.
             if basis is None:
                 basis = TridiagC_Basis(n)
 
-            # L-BFGS general doesn't work well for this problem (constraint handling issues)
-            # Fall back to newton-cg for reliable convergence
+            # Compute Lambda even if ill-conditioned - try our best
+            try:
+                Lambda = spd_inverse(Sigma)
+            except np.linalg.LinAlgError:
+                info["error"] = "Cholesky failed for Sigma"
+                info["time"] = time.time() - t_start
+                return np.nan, info
+
             actual_method = "newton-cg" if method == "lbfgs" else method
-            if method == "lbfgs" and verbose:
-                print(f"  Note: L-BFGS not supported for fbm solver, using newton-cg")
 
             B, _, x, decomp_info = constrained_decomposition(
                 A=Lambda, basis=basis, method=actual_method,
@@ -888,14 +886,12 @@ def invest_value_fbm(H, n, strategy, method="newton", Sigma=None, Lambda=None, b
             )
             info["iters"] = decomp_info["iters"]
             info["method"] = decomp_info.get("used_method", actual_method)
-            if method == "lbfgs":
-                info["method"] += " (lbfgs fallback)"
             info["x"] = x
         else:
             raise ValueError(f"Unknown strategy for fbm: {strategy}")
 
-        # === Step 5: Compute value ===
-        # For markovian: value = 0.5 * (log|C| - log|B|) where C = Sigma
+        # === Step 4: Compute value ===
+        # For markovian: value = 0.5 * (log|Σ| - log|B|)
         _, log_det_B = np.linalg.slogdet(B)
         value = 0.5 * (log_det_Sigma - log_det_B)
 
@@ -1662,22 +1658,18 @@ if __name__ == "__main__":
 
             if model_type == "fbm":
                 # === Pure fBM: 2 strategies (markovian, full) ===
-                # Markovian strategy (needs Lambda, skip if ill-conditioned)
+                # Markovian strategy - uses direct barrier method, works for all H!
                 if run_markovian:
-                    if ill_conditioned or Lambda is None:
-                        print(f"  Markovian: SKIPPED (cond={cond:.2e} > {max_cond:.0e})")
+                    v_markov, info = invest_value_fbm(
+                        H=H, n=n, strategy="markovian", method=method,
+                        Sigma=Sigma, basis=basis_markov,
+                        tol=1e-6, verbose=False
+                    )
+                    if info["error"]:
+                        print(f"  Markovian: FAILED - {info['error']}")
                         v_markov = np.nan
                     else:
-                        v_markov, info = invest_value_fbm(
-                            H=H, n=n, strategy="markovian", method=method,
-                            Sigma=Sigma, Lambda=Lambda, basis=basis_markov,
-                            tol=1e-6, verbose=False
-                        )
-                        if info["error"]:
-                            print(f"  Markovian: FAILED - {info['error']}")
-                            v_markov = np.nan
-                        else:
-                            print(f"  Markovian: {v_markov:.6f} ({info['time']:.2f}s, {info['iters']} iters)")
+                        print(f"  Markovian: {v_markov:.6f} ({info['time']:.2f}s, {info['iters']} iters)")
 
                 # Full strategy (closed-form using A_diff - always well-conditioned!)
                 if run_full:
