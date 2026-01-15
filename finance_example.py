@@ -1435,6 +1435,11 @@ if __name__ == "__main__":
                         help="Maximum condition number for Sigma matrix. Skip H values exceeding this (default: 1e6).")
     parser.add_argument("--cg-max-iter", type=int, default=500,
                         help="Maximum CG iterations for newton-cg solver (default: 500).")
+    parser.add_argument("--sort-h-by-center", action="store_true",
+                        help="Sort H values by distance from 0.5 (start with easier cases near center). "
+                             "Useful when convergence is slow at extreme H values.")
+    parser.add_argument("--verbose", action="store_true",
+                        help="Enable verbose output from optimization solvers (show iteration progress).")
     args = parser.parse_args()
 
     model_type = args.model
@@ -1456,6 +1461,8 @@ if __name__ == "__main__":
     incremental = args.incremental
     max_cond = args.max_cond
     cg_max_iter = args.cg_max_iter
+    sort_h_by_center = args.sort_h_by_center
+    verbose_solver = args.verbose
 
     if workers is None:
         workers = max(1, os.cpu_count() - 2)
@@ -1464,6 +1471,14 @@ if __name__ == "__main__":
     # H range: from max(hmin, hres) to hmax (exclusive), with step hres
     h_start = max(hmin, hres) if hmin == 0.0 else hmin
     H_vec = np.arange(h_start, hmax, hres)
+
+    # Optionally sort H values by distance from 0.5 (start with easier cases)
+    if sort_h_by_center:
+        # Sort by distance from 0.5, so we start with H near 0.5 (well-conditioned)
+        # and move outward to extreme values (H near 0 or 1)
+        H_vec = H_vec[np.argsort(np.abs(H_vec - 0.5))]
+        print(f"H values sorted by distance from 0.5:")
+        print(f"  Order: {', '.join([f'{h:.2f}' for h in H_vec[:10]])}{'...' if len(H_vec) > 10 else ''}")
 
     if model_type == "fbm":
         N = n
@@ -1663,7 +1678,7 @@ if __name__ == "__main__":
                     v_markov, info = invest_value_fbm(
                         H=H, n=n, strategy="markovian", method=method,
                         Sigma=Sigma, basis=basis_markov,
-                        tol=1e-6, verbose=False
+                        tol=1e-6, verbose=verbose_solver
                     )
                     if info["error"]:
                         print(f"  Markovian: FAILED - {info['error']}")
@@ -1697,7 +1712,7 @@ if __name__ == "__main__":
                     v_markov, info = invest_value_mixed_fbm(
                         H=H, N=N, alpha=alpha, delta_t=delta_t, strategy="markovian",
                         method=method, Sigma=Sigma, Lambda=Lambda, basis=basis_markov,
-                        tol=1e-6, verbose=False
+                        tol=1e-6, verbose=verbose_solver
                     )
                     if info["error"]:
                         print(f"  Markovian: FAILED - {info['error']}")
@@ -1710,7 +1725,7 @@ if __name__ == "__main__":
                     v_full, info = invest_value_mixed_fbm(
                         H=H, N=N, alpha=alpha, delta_t=delta_t, strategy="full",
                         method=method, Sigma=Sigma, Lambda=Lambda, basis=basis_full,
-                        tol=1e-6, verbose=False
+                        tol=1e-6, verbose=verbose_solver
                     )
                     if info["error"]:
                         print(f"  Full-info: FAILED - {info['error']}")

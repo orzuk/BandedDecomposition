@@ -138,7 +138,8 @@ python finance_example.py \\
     --hmax ${HMAX} \\
     --hres ${HRES} \\
     --incremental \\
-    --max-cond 1e8
+    --max-cond 1e8 \\
+    --sort-h-by-center
 
 echo ""
 echo "Job completed at: \$(date)"
