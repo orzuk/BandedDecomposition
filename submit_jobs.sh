@@ -70,8 +70,12 @@ echo ""
 echo "Models: ${MODELS[*]}"
 echo "N values: ${N_VALUES[*]}"
 echo "Alpha values: ${ALPHA_VALUES[*]}"
+echo "Strategies: markovian, full (submitted separately)"
 echo "H range: ${HMIN} to ${HMAX} (step ${HRES})"
 echo ""
+
+# Strategy list - run markovian and full separately so they don't block each other
+STRATEGIES=("markovian" "full")
 
 for model in "${MODELS[@]}"; do
     for n in "${N_VALUES[@]}"; do
@@ -83,30 +87,37 @@ for model in "${MODELS[@]}"; do
         fi
 
         for alpha in "${alpha_list[@]}"; do
-            # Get SLURM settings based on n
-            read -r time mem cpus <<< $(get_slurm_settings $n $model)
+            for strategy in "${STRATEGIES[@]}"; do
+                # Get SLURM settings based on n and strategy
+                # Markovian is much faster than full
+                if [ "$strategy" == "markovian" ]; then
+                    # Markovian is O(n) per iteration, much faster
+                    if [ "$n" -le 500 ]; then
+                        time="02:00:00"; mem="4G"; cpus="4"
+                    elif [ "$n" -le 1000 ]; then
+                        time="06:00:00"; mem="4G"; cpus="4"
+                    else
+                        time="12:00:00"; mem="8G"; cpus="4"
+                    fi
+                else
+                    # Full strategy is O(n²) per iteration, slower
+                    read -r time mem cpus <<< $(get_slurm_settings $n $model)
+                fi
 
-            # Create job name (no alpha suffix for fbm)
-            if [ "$model" == "fbm" ]; then
-                job_name="${model}_n${n}"
-            else
-                job_name="${model}_n${n}_a${alpha}"
-            fi
-            job_script="${JOBS_DIR}/${job_name}.sh"
+                # Create job name
+                if [ "$model" == "fbm" ]; then
+                    job_name="${model}_n${n}_${strategy}"
+                else
+                    job_name="${model}_n${n}_a${alpha}_${strategy}"
+                fi
+                job_script="${JOBS_DIR}/${job_name}.sh"
 
-            # Determine strategy based on model
-            if [ "$model" == "fbm" ]; then
-                strategy="both"  # markovian + full (2 strategies)
-            else
-                strategy="both"  # sum + markovian + full (3 strategies)
-            fi
-
-            # Build command - skip --alpha for fbm
-            if [ "$model" == "fbm" ]; then
-                alpha_arg=""
-            else
-                alpha_arg="--alpha ${alpha}"
-            fi
+                # Build command - skip --alpha for fbm
+                if [ "$model" == "fbm" ]; then
+                    alpha_arg=""
+                else
+                    alpha_arg="--alpha ${alpha}"
+                fi
 
             # Create SLURM job script
             cat > "$job_script" << EOF
@@ -156,9 +167,10 @@ EOF
             fi
 
             ((job_count++))
-        done
-    done
-done
+            done  # strategy loop
+        done  # alpha loop
+    done  # n loop
+done  # model loop
 
 echo ""
 echo "=============================================="
