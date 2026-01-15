@@ -1495,8 +1495,16 @@ if __name__ == "__main__":
             print("ERROR: No results found in CSV file")
             exit(1)
 
+        # In plot-all mode, use --hmin/--hmax as plot range if --plot-hmin/--plot-hmax not specified
+        if plot_hmin is None and hmin != 0.0:
+            plot_hmin = hmin
+        if plot_hmax is None and hmax != 1.0:  # default hmax in arg parser is 1.0
+            plot_hmax = hmax
+
         print(f"\n{'='*60}")
         print(f"Plot-all mode: found {len(combos)} unique (model, n, alpha) combinations")
+        if plot_hmin is not None or plot_hmax is not None:
+            print(f"H range filter: [{plot_hmin or 0.0:.2f}, {plot_hmax or 1.0:.2f}]")
         print(f"{'='*60}\n")
 
         here = Path(__file__).resolve().parent
@@ -1558,13 +1566,10 @@ if __name__ == "__main__":
             # Save figure
             fig_dir = here / "figs" / model_i
             fig_dir.mkdir(parents=True, exist_ok=True)
-            # Use requested H range in filename (not actual data range) for consistency
-            if plot_hmin is not None or plot_hmax is not None:
-                hmin_str = f"{plot_hmin:.2f}" if plot_hmin is not None else "0"
-                hmax_str = f"{plot_hmax:.2f}" if plot_hmax is not None else "1"
-                h_range_str = f"H_{hmin_str}_{hmax_str}"
-            else:
-                h_range_str = "H_full"
+            # Always include H range in filename for consistency
+            hmin_str = f"{plot_hmin:.2f}" if plot_hmin is not None else "0.00"
+            hmax_str = f"{plot_hmax:.2f}" if plot_hmax is not None else "1.00"
+            h_range_str = f"H_{hmin_str}_{hmax_str}"
             alpha_str = f"_a{alpha_i:.1f}" if model_i == "mixed_fbm" and alpha_i != 1.0 else ""
             out_png = fig_dir / f"value_{model_i}_n_{n_i}_{h_range_str}{alpha_str}_both.png"
             plt.savefig(out_png, dpi=150)
@@ -1806,13 +1811,10 @@ if __name__ == "__main__":
     fig_dir = here / "figs" / model_type
     fig_dir.mkdir(parents=True, exist_ok=True)
 
-    # Use requested H range in filename (not actual data range) for consistency
-    if plot_hmin is not None or plot_hmax is not None:
-        hmin_str = f"{plot_hmin:.2f}" if plot_hmin is not None else "0"
-        hmax_str = f"{plot_hmax:.2f}" if plot_hmax is not None else "1"
-        h_range_str = f"H_{hmin_str}_{hmax_str}"
-    else:
-        h_range_str = "H_full"
+    # Always include H range in filename for consistency
+    hmin_str = f"{plot_hmin:.2f}" if plot_hmin is not None else "0.00"
+    hmax_str = f"{plot_hmax:.2f}" if plot_hmax is not None else "1.00"
+    h_range_str = f"H_{hmin_str}_{hmax_str}"
     alpha_str = f"_a{alpha:.1f}" if model_type == "mixed_fbm" and alpha != 1.0 else ""
     out_png = fig_dir / f"value_{model_type}_n_{n}_{h_range_str}{alpha_str}_{strategy}.png"
     plt.savefig(out_png, dpi=150)
