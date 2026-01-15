@@ -23,7 +23,11 @@ def get_results_file():
 
 
 def append_result(H, val_sum, val_markov, val_full, params):
-    """Append a single result row to the master CSV file (thread/process safe)."""
+    """Append or update a result row in the master CSV file (thread/process safe).
+
+    If a row with matching (H, model, n, alpha) exists, merge new values into it.
+    Otherwise, append a new row.
+    """
     filename = get_results_file()
     lockfile = filename.with_suffix('.csv.lock')
 
@@ -31,28 +35,49 @@ def append_result(H, val_sum, val_markov, val_full, params):
     all_columns = ['H', 'model', 'n', 'N', 'alpha', 'delta_t', 'strategy',
                    'value_sum', 'value_markovian', 'value_full']
 
-    row = {
-        'H': round(H, 6),
+    H_rounded = round(H, 6)
+    new_row = {
+        'H': H_rounded,
         'model': params['model'],
         'n': params['n'],
         'N': params.get('N', params['n']),
         'alpha': params['alpha'],
         'delta_t': round(params.get('delta_t', 1.0), 6),
         'strategy': params['strategy'],
-        'value_sum': round(val_sum, 6) if val_sum is not None else '',
-        'value_markovian': round(val_markov, 6) if val_markov is not None else '',
-        'value_full': round(val_full, 6) if val_full is not None else '',
+        'value_sum': round(val_sum, 6) if val_sum is not None and not np.isnan(val_sum) else '',
+        'value_markovian': round(val_markov, 6) if val_markov is not None and not np.isnan(val_markov) else '',
+        'value_full': round(val_full, 6) if val_full is not None and not np.isnan(val_full) else '',
     }
-
-    df_row = pd.DataFrame([row], columns=all_columns)
 
     # Use file locking for safe concurrent writes
     with open(lockfile, 'w') as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)  # Acquire exclusive lock
         try:
             if filename.exists():
-                df_row.to_csv(filename, mode='a', header=False, index=False)
+                df = pd.read_csv(filename, dtype={'value_sum': str, 'value_markovian': str, 'value_full': str})
+
+                # Find existing row with same key (H, model, n, alpha)
+                mask = (
+                    (np.isclose(df['H'], H_rounded)) &
+                    (df['model'] == params['model']) &
+                    (df['n'] == params['n']) &
+                    (np.isclose(df['alpha'], params['alpha']))
+                )
+
+                if mask.any():
+                    # Update existing row - merge new values into old
+                    idx = df[mask].index[0]
+                    for col in ['value_sum', 'value_markovian', 'value_full']:
+                        new_val = new_row[col]
+                        if new_val != '':  # Only update if we have a new value
+                            df.at[idx, col] = new_val
+                    df.to_csv(filename, index=False)
+                else:
+                    # Append new row
+                    df_row = pd.DataFrame([new_row], columns=all_columns)
+                    df_row.to_csv(filename, mode='a', header=False, index=False)
             else:
+                df_row = pd.DataFrame([new_row], columns=all_columns)
                 df_row.to_csv(filename, index=False)
         finally:
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)  # Release lock
