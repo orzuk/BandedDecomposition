@@ -1665,7 +1665,7 @@ if __name__ == "__main__":
                 n_skipped_done += 1
                 continue
 
-            print(f"\n--- H = {H:.4f} ({i+1}/{len(H_vec)}) ---")
+            print(f"\n--- H = {H:.4f} ({i+1}/{len(H_vec)}), method={method} ---")
 
             # Build Sigma and check condition number (model-specific)
             if model_type == "fbm":
