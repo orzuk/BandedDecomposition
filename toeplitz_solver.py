@@ -1284,7 +1284,8 @@ class BlockedNewtonSolver:
             t_gradient += time.time() - t0
 
             if self.verbose and (it % 10 == 0 or it < 5):
-                print(f"Iter {it}: max|g| = {max_g:.3e}, step = {step:.3f}, t={time.time() - t_start:.1f}s (B={t_B_compute:.1f}s, grad={t_gradient:.1f}s, CG={t_hessian:.1f}s, ls={t_linesearch:.1f}s)")
+                hess_label = "Hess" if method == "newton" else "CG"
+                print(f"Iter {it}: max|g| = {max_g:.3e}, step = {step:.3f}, t={time.time() - t_start:.1f}s (B={t_B_compute:.1f}s, grad={t_gradient:.1f}s, {hess_label}={t_hessian:.1f}s, ls={t_linesearch:.1f}s)")
 
         C = self.build_C(x)
         t_total = time.time() - t_start
