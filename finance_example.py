@@ -1065,6 +1065,20 @@ def invest_value_mixed_fbm(H, N, alpha, delta_t, strategy, method="newton", solv
                 info["iters"] = solve_info["iters"]
                 info["method"] = method
                 info["x"] = x
+            elif method == "precond-newton-cg" and strategy == "markovian":
+                # Use generic constrained_decomposition with preconditioning for markovian
+                # This is slower per-iteration than BlockedNewtonSolver but converges faster
+                # for ill-conditioned problems (extreme H values)
+                t0 = time.time()
+                B, _, x, decomp_info = constrained_decomposition(
+                    A=Lambda, basis=basis, method="precond-newton-cg",
+                    tol=tol, max_iter=max_iter, verbose=verbose, return_info=True,
+                    x_init=x_init, cg_max_iter=cg_max_iter
+                )
+                t_solve = time.time() - t0
+                info["iters"] = decomp_info["iters"]
+                info["method"] = "precond-newton-cg"
+                info["x"] = x
             elif method == "lbfgs":
                 # L-BFGS only works efficiently for markovian strategy (handled above)
                 # For full strategy, Newton-CG is actually faster because:

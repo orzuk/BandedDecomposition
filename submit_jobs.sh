@@ -141,12 +141,12 @@ echo "H range: ${HMIN} to ${HMAX} (step ${HRES})"
 echo "Time: \$(date)"
 echo ""
 
-# Use tighter tolerance for markovian (fast), looser for full (slow)
-# Use preconditioned Newton-CG for full strategy (faster CG convergence)
+# Use preconditioned Newton-CG for both strategies (faster CG convergence)
+# Markovian has smaller m but can still be ill-conditioned at extreme H
 if [ "${strategy}" == "markovian" ]; then
     TOL="1e-6"
-    CG_MAX="200"
-    METHOD="newton-cg"
+    CG_MAX="500"
+    METHOD="precond-newton-cg"  # Use preconditioning for ill-conditioned cases
 else
     TOL="1e-4"              # Looser tolerance for faster convergence
     CG_MAX="500"            # More CG iterations (precond should reduce this)
