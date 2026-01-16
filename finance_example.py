@@ -1062,7 +1062,7 @@ def invest_value_mixed_fbm(H, N, alpha, delta_t, strategy, method="newton", solv
                 solver_obj = BlockedNewtonSolver(N, H, alpha, delta_t, verbose=verbose)
                 # Map method: precond-newton-cg uses newton-cg with preconditioning
                 solver_method = "newton-cg" if method == "precond-newton-cg" else method
-                use_precond = method in ("newton-cg", "precond-newton-cg")  # preconditioning for CG methods
+                use_precond = (method == "precond-newton-cg")  # only precond-newton-cg uses preconditioning
                 B, _, x, solve_info = solver_obj.solve(tol=tol, max_iter=max_iter, method=solver_method, use_precond=use_precond)
                 t_solve = time.time() - t0
                 info["iters"] = solve_info["iters"]
