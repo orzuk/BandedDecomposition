@@ -1088,15 +1088,23 @@ def invest_value_mixed_fbm(H, N, alpha, delta_t, strategy, method="newton", solv
                 info["method"] = "newton-cg"
                 info["x"] = x
             else:
+                # For full strategy, auto-disable preconditioning (too expensive: m Hv products for m~N²)
+                # Preconditioning is only worth it for markovian where m~N is small
+                actual_method = method
+                if strategy == "full" and method == "precond-newton-cg":
+                    actual_method = "newton-cg"
+                    if verbose:
+                        print(f"  [Auto] Using newton-cg for full strategy (precond too expensive for m={basis.m})")
+
                 t0 = time.time()
                 B, _, x, decomp_info = constrained_decomposition(
-                    A=Lambda, basis=basis, method=method,
+                    A=Lambda, basis=basis, method=actual_method,
                     tol=tol, max_iter=max_iter, verbose=verbose, return_info=True,
                     x_init=x_init, cg_max_iter=cg_max_iter
                 )
                 t_solve = time.time() - t0
                 info["iters"] = decomp_info["iters"]
-                info["method"] = decomp_info.get("used_method", method)
+                info["method"] = decomp_info.get("used_method", actual_method)
                 info["x"] = x  # Return for warm starting next iteration
 
         # === Step 5: Compute log|B| and final value (shared formula) ===
