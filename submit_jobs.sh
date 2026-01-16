@@ -22,7 +22,7 @@ MODELS=("mixed_fbm" "fbm")  # Both models
 
 # H range
 HMIN=0.01
-HMAX=0.99
+HMAX=1.00
 HRES=0.01
 
 # SLURM settings (adjust based on n)
