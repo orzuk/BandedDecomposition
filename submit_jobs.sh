@@ -141,16 +141,17 @@ echo "H range: ${HMIN} to ${HMAX} (step ${HRES})"
 echo "Time: \$(date)"
 echo ""
 
-# Use preconditioned Newton-CG for both strategies (faster CG convergence)
-# Markovian has smaller m but can still be ill-conditioned at extreme H
+# Best method per strategy:
+# - Markovian (m~N): precond-newton-cg (preconditioning helps ill-conditioned cases)
+# - Full (m~N²): newton-cg (preconditioning too expensive - m Hv products)
 if [ "${strategy}" == "markovian" ]; then
     TOL="1e-6"
     CG_MAX="500"
-    METHOD="precond-newton-cg"  # Use preconditioning for ill-conditioned cases
+    METHOD="precond-newton-cg"  # Preconditioning worth it for small m
 else
     TOL="1e-4"              # Looser tolerance for faster convergence
-    CG_MAX="500"            # More CG iterations (precond should reduce this)
-    METHOD="precond-newton-cg"  # Diagonal preconditioning for faster CG
+    CG_MAX="500"
+    METHOD="newton-cg"      # No preconditioning - too expensive for m~N²
 fi
 
 python finance_example.py \\
@@ -166,7 +167,8 @@ python finance_example.py \\
     --max-cond 1e8 \\
     --sort-h-by-center \\
     --tol \${TOL} \\
-    --cg-max-iter \${CG_MAX}
+    --cg-max-iter \${CG_MAX} \\
+    --verbose
 
 echo ""
 echo "Job completed at: \$(date)"
