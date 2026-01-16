@@ -168,15 +168,15 @@ def get_completed_H_values(model, n, alpha, strategy):
         finally:
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
+    # Filter by model, n, alpha (but NOT strategy - we check value columns instead)
     mask = (
         (df['model'] == model) &
         (df['n'] == n) &
-        (np.isclose(df['alpha'], alpha)) &
-        (df['strategy'] == strategy)
+        (np.isclose(df['alpha'], alpha))
     )
 
-    # Also check that relevant value columns are filled (not empty/NaN)
-    # For strategy="both", need all applicable columns to be complete
+    # Check if the relevant value columns are filled (regardless of strategy column)
+    # This allows jobs with --strategy markovian to recognize values from strategy='both' rows
     if strategy == "both":
         has_markov = df['value_markovian'].notna() & (df['value_markovian'] != '')
         has_full = df['value_full'].notna() & (df['value_full'] != '')
