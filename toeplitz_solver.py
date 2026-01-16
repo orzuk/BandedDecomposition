@@ -1158,7 +1158,23 @@ class BlockedNewtonSolver:
 
         return D11, D12
 
-    def solve(self, tol=1e-8, max_iter=200, method="newton-cg", use_block_opt=True, use_block_hv=True):
+    def compute_hessian_diagonal(self, B, use_block_hv=True):
+        """
+        Compute diagonal of Hessian: H_kk = e_k^T H e_k for all k.
+
+        Used for diagonal preconditioning in CG.
+        """
+        compute_Hv = self.compute_hessian_vector_product_block if use_block_hv else self.compute_hessian_vector_product
+
+        diag_H = np.zeros(self.m, dtype=np.float64)
+        for k in range(self.m):
+            e_k = np.zeros(self.m, dtype=np.float64)
+            e_k[k] = 1.0
+            Hv = compute_Hv(B, e_k)
+            diag_H[k] = Hv[k]
+        return diag_H
+
+    def solve(self, tol=1e-8, max_iter=200, method="newton-cg", use_block_opt=True, use_block_hv=True, use_precond=True):
         """
         Solve the constrained decomposition problem.
 
@@ -1178,6 +1194,8 @@ class BlockedNewtonSolver:
         use_block_hv : bool
             If True, use block-optimized Hessian-vector products (4-8x faster).
             If False, use standard 2N×2N matrix products.
+        use_precond : bool
+            If True, use diagonal preconditioning for CG (faster for ill-conditioned).
 
         Returns
         -------
@@ -1248,8 +1266,19 @@ class BlockedNewtonSolver:
                     return compute_Hv(B, v)
 
                 H_linop = LinearOperator((self.m, self.m), matvec=Hv_op)
+
+                # Build diagonal preconditioner if requested
+                M_linop = None
+                if use_precond:
+                    diag_H = self.compute_hessian_diagonal(B, use_block_hv)
+                    diag_H_safe = np.maximum(diag_H, 1e-10)  # avoid division by zero
+                    # Preconditioner: M^{-1} = diag(1/H_kk)
+                    M_linop = LinearOperator((self.m, self.m), matvec=lambda v: v / diag_H_safe)
+                    if self.verbose and it == 0:
+                        print(f"  [Precond] diag(H) range: [{diag_H.min():.2e}, {diag_H.max():.2e}], cond={diag_H.max()/max(diag_H.min(),1e-10):.2e}")
+
                 # Use more CG iterations for ill-conditioned problems
-                d, cg_info = cg(H_linop, -g, rtol=1e-6, maxiter=self.m)
+                d, cg_info = cg(H_linop, -g, rtol=1e-6, maxiter=self.m, M=M_linop)
                 if self.verbose:
                     print(f"  [CG] info={cg_info} (0=converged, >0=maxiter)")
             t_hessian += time.time() - t0

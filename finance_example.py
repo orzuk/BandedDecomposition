@@ -1055,29 +1055,18 @@ def invest_value_mixed_fbm(H, N, alpha, delta_t, strategy, method="newton", solv
                 info["iters"] = solve_info["iters"]
                 info["method"] = "lbfgs"
                 info["x"] = x
-            elif method in ("newton", "newton-cg") and strategy == "markovian":
+            elif method in ("newton", "newton-cg", "precond-newton-cg") and strategy == "markovian":
                 # Use BlockedNewtonSolver for markovian - exploits Toeplitz structure
                 from toeplitz_solver import BlockedNewtonSolver
                 t0 = time.time()
                 solver_obj = BlockedNewtonSolver(N, H, alpha, delta_t, verbose=verbose)
-                B, _, x, solve_info = solver_obj.solve(tol=tol, max_iter=max_iter, method=method)
+                # Map method: precond-newton-cg uses newton-cg with preconditioning
+                solver_method = "newton-cg" if method == "precond-newton-cg" else method
+                use_precond = method in ("newton-cg", "precond-newton-cg")  # preconditioning for CG methods
+                B, _, x, solve_info = solver_obj.solve(tol=tol, max_iter=max_iter, method=solver_method, use_precond=use_precond)
                 t_solve = time.time() - t0
                 info["iters"] = solve_info["iters"]
                 info["method"] = method
-                info["x"] = x
-            elif method == "precond-newton-cg" and strategy == "markovian":
-                # Use generic constrained_decomposition with preconditioning for markovian
-                # This is slower per-iteration than BlockedNewtonSolver but converges faster
-                # for ill-conditioned problems (extreme H values)
-                t0 = time.time()
-                B, _, x, decomp_info = constrained_decomposition(
-                    A=Lambda, basis=basis, method="precond-newton-cg",
-                    tol=tol, max_iter=max_iter, verbose=verbose, return_info=True,
-                    x_init=x_init, cg_max_iter=cg_max_iter
-                )
-                t_solve = time.time() - t0
-                info["iters"] = decomp_info["iters"]
-                info["method"] = "precond-newton-cg"
                 info["x"] = x
             elif method == "lbfgs":
                 # L-BFGS only works efficiently for markovian strategy (handled above)
