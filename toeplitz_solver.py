@@ -1248,7 +1248,10 @@ class BlockedNewtonSolver:
                     return compute_Hv(B, v)
 
                 H_linop = LinearOperator((self.m, self.m), matvec=Hv_op)
-                d, cg_info = cg(H_linop, -g, rtol=1e-6, maxiter=min(100, self.m))
+                # Use more CG iterations for ill-conditioned problems
+                d, cg_info = cg(H_linop, -g, rtol=1e-6, maxiter=self.m)
+                if self.verbose:
+                    print(f"  [CG] info={cg_info} (0=converged, >0=maxiter)")
             t_hessian += time.time() - t0
 
             # Line search (Cholesky success implies SPD)
@@ -1280,8 +1283,10 @@ class BlockedNewtonSolver:
             g = self.compute_gradient(B)
             t_gradient += time.time() - t0
 
-            if self.verbose and it % 10 == 0:
-                print(f"Iter {it}: max|g| = {max_g:.3e}, step = {step:.3f}")
+            if self.verbose:
+                iter_time = time.time() - t_start - sum([t_B_compute, t_gradient, t_hessian, t_linesearch]) + t_B_compute + t_gradient + t_hessian + t_linesearch
+                if it % 10 == 0 or it < 5:
+                    print(f"Iter {it}: max|g| = {max_g:.3e}, step = {step:.3f}, time={time.time() - t_start:.1f}s")
 
         C = self.build_C(x)
         t_total = time.time() - t_start
