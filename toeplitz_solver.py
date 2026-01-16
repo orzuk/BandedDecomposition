@@ -1238,6 +1238,19 @@ class BlockedNewtonSolver:
             print(f"  Block B: {'ON' if use_block_opt else 'OFF'}, Block Hv: {'ON' if use_block_hv else 'OFF'}")
             print(f"  Initial max|g| = {np.max(np.abs(g)):.3e}")
 
+        # Precompute diagonal preconditioner ONCE (expensive: m Hv products)
+        # Reuse throughout iterations - preconditioner doesn't need to be exact
+        diag_H_precond = None
+        M_linop = None
+        if use_precond and method == "newton-cg":
+            from scipy.sparse.linalg import LinearOperator
+            t0_precond = time.time()
+            diag_H_precond = self.compute_hessian_diagonal(B, use_block_hv)
+            diag_H_safe = np.maximum(diag_H_precond, 1e-10)
+            M_linop = LinearOperator((self.m, self.m), matvec=lambda v, d=diag_H_safe: v / d)
+            if self.verbose:
+                print(f"  [Precond] computed in {time.time() - t0_precond:.1f}s, diag(H) range: [{diag_H_precond.min():.2e}, {diag_H_precond.max():.2e}]")
+
         t_iter_start = time.time()
         for it in range(max_iter):
             max_g = np.max(np.abs(g))
@@ -1268,17 +1281,7 @@ class BlockedNewtonSolver:
 
                 H_linop = LinearOperator((self.m, self.m), matvec=Hv_op)
 
-                # Build diagonal preconditioner if requested
-                M_linop = None
-                if use_precond:
-                    diag_H = self.compute_hessian_diagonal(B, use_block_hv)
-                    diag_H_safe = np.maximum(diag_H, 1e-10)  # avoid division by zero
-                    # Preconditioner: M^{-1} = diag(1/H_kk)
-                    M_linop = LinearOperator((self.m, self.m), matvec=lambda v: v / diag_H_safe)
-                    if self.verbose and it == 0:
-                        print(f"  [Precond] diag(H) range: [{diag_H.min():.2e}, {diag_H.max():.2e}], cond={diag_H.max()/max(diag_H.min(),1e-10):.2e}")
-
-                # Use more CG iterations for ill-conditioned problems
+                # Use precomputed diagonal preconditioner (M_linop computed before loop)
                 d, cg_info = cg(H_linop, -g, rtol=1e-6, maxiter=self.m, M=M_linop)
                 if self.verbose:
                     print(f"  [CG] info={cg_info} (0=converged, >0=maxiter)")
