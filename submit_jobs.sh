@@ -140,12 +140,15 @@ echo "Time: \$(date)"
 echo ""
 
 # Use tighter tolerance for markovian (fast), looser for full (slow)
+# Use preconditioned Newton-CG for full strategy (faster CG convergence)
 if [ "${strategy}" == "markovian" ]; then
     TOL="1e-6"
     CG_MAX="200"
+    METHOD="newton-cg"
 else
-    TOL="1e-4"      # Looser tolerance for faster convergence
-    CG_MAX="1000"   # More CG iterations for ill-conditioned cases
+    TOL="1e-4"              # Looser tolerance for faster convergence
+    CG_MAX="500"            # More CG iterations (precond should reduce this)
+    METHOD="precond-newton-cg"  # Diagonal preconditioning for faster CG
 fi
 
 python finance_example.py \\
@@ -153,7 +156,7 @@ python finance_example.py \\
     --n ${n} \\
     ${alpha_arg} \\
     --strategy ${strategy} \\
-    --method newton-cg \\
+    --method ${METHOD} \\
     --hmin ${HMIN} \\
     --hmax ${HMAX} \\
     --hres ${HRES} \\

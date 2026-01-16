@@ -1697,6 +1697,91 @@ def hessvec_spd_from_B(v, B, basis: SymBasis):
     return Hv
 
 
+def compute_hessian_diagonal(B, basis: SymBasis):
+    """
+    Compute the diagonal of the Hessian H_kk = tr(D_k B D_k B) for all k.
+
+    This is used for diagonal preconditioning in Newton-CG.
+
+    For COO sparse basis matrices with few nonzeros, this is efficient:
+    - For D_k with nonzeros at positions (rows, cols) with values vals:
+      H_kk = sum_{a,b} vals[a] * vals[b] * B[rows[a], rows[b]] * B[cols[a], cols[b]]
+
+    For a symmetric off-diagonal basis matrix D_k with entries at (r,c) and (c,r):
+      H_kk = 2 * (B[r,c]^2 + B[r,r] * B[c,c])
+
+    Parameters
+    ----------
+    B : np.ndarray
+        The inverse of M = A - C(x), shape (n, n).
+    basis : SymBasis
+        The basis defining the constraint space.
+
+    Returns
+    -------
+    diag_H : np.ndarray
+        The diagonal of the Hessian, shape (m,).
+    """
+    m = basis.m
+    n = basis.n
+    diag_H = np.zeros(m, dtype=float)
+
+    if basis.is_sparse_coo():
+        # Efficient computation for COO sparse basis
+        for k in range(m):
+            rows, cols, vals = basis._coo[k]
+            nnz = len(vals)
+            # H_kk = sum_{a,b} vals[a] * vals[b] * B[rows[a], rows[b]] * B[cols[a], cols[b]]
+            # This is O(nnz^2) per basis matrix
+            h_kk = 0.0
+            for a in range(nnz):
+                for b in range(nnz):
+                    h_kk += vals[a] * vals[b] * B[rows[a], rows[b]] * B[cols[a], cols[b]]
+            diag_H[k] = h_kk
+    else:
+        # Fallback for dense basis: compute tr(D_k B D_k B) directly
+        for k in range(m):
+            Dk = basis.mat(k)
+            BDk = B @ Dk
+            diag_H[k] = np.trace(Dk @ BDk @ B)
+
+    return diag_H
+
+
+def compute_hessian_diagonal_coo_fast(B, basis: SymBasis):
+    """
+    Fast vectorized computation of Hessian diagonal for COO sparse basis.
+
+    Optimized for bases where each D_k has exactly 2 nonzeros (symmetric off-diagonal),
+    which is the case for mixed_fbm full-info basis.
+
+    For D_k with entries at (r, c) and (c, r) with value 1:
+        H_kk = 2 * (B[r,c]^2 + B[r,r] * B[c,c])
+    """
+    m = basis.m
+    diag_H = np.zeros(m, dtype=float)
+
+    if not basis.is_sparse_coo():
+        return compute_hessian_diagonal(B, basis)
+
+    # Check if all basis matrices have exactly 2 nonzeros (common case)
+    all_two_nnz = all(len(basis._coo[k][0]) == 2 for k in range(m))
+
+    if all_two_nnz:
+        # Fast path for symmetric off-diagonal basis matrices
+        for k in range(m):
+            rows, cols, vals = basis._coo[k]
+            # Assuming symmetric: rows=[r,c], cols=[c,r], vals=[1,1]
+            r, c = rows[0], cols[0]
+            # H_kk = 2 * (B[r,c]^2 + B[r,r] * B[c,c])
+            diag_H[k] = 2.0 * (B[r, c]**2 + B[r, r] * B[c, c])
+    else:
+        # General case
+        diag_H = compute_hessian_diagonal(B, basis)
+
+    return diag_H
+
+
 def constrained_decomposition(
     A,
     basis: SymBasis,
@@ -1783,8 +1868,8 @@ def constrained_decomposition(
             return B, C, x, {"iters": 0, "backtracks": 0, "converged": True, "final_max_abs_trace": 0.0, "used_method": method}
         return B, C, x
 
-    if method not in ("gradient-descent", "quasi-newton", "newton", "newton-cg"):
-        raise ValueError("method must be one of {'gradient-descent','quasi-newton','newton','newton-cg'}.")
+    if method not in ("gradient-descent", "quasi-newton", "newton", "newton-cg", "precond-newton-cg"):
+        raise ValueError("method must be one of {'gradient-descent','quasi-newton','newton','newton-cg','precond-newton-cg'}.")
 
     # Auto-detect matrix structure and select best Cholesky backend
     if auto_backend:
@@ -1831,7 +1916,7 @@ def constrained_decomposition(
         x = np.zeros(m, dtype=float)
 
     # Initial evaluation (phi + g) without explicit B when possible
-    if used_method in ("gradient-descent", "quasi-newton", "newton-cg"):
+    if used_method in ("gradient-descent", "quasi-newton", "newton-cg", "precond-newton-cg"):
         phi, g, factor, C, M = phi_grad_spd_implicit_selected(A, x, basis, cholesky_backend=cholesky_backend)
         H = None
         g_prev = g.copy()  # for BFGS
@@ -1890,30 +1975,54 @@ def constrained_decomposition(
 
         else:
             # -------------------------
-            # newton-cg with implicit-B Hv
+            # newton-cg or precond-newton-cg with implicit-B Hv
             # -------------------------
             lam = max(newton_damping, 0.0)
+            use_precond = (used_method == "precond-newton-cg")
 
-            if basis.is_sparse_coo():
-                Hv = hessvec_spd_coo_implicit_factory(factor, basis, drop_tol=hv_drop_tol, cholesky_backend=cholesky_backend)
-            else:
-                # dense basis fallback: Hv requires explicit B (no generic win)
+            # For preconditioning, we need B explicitly to compute diagonal of Hessian
+            B_explicit = None
+            if use_precond or not basis.is_sparse_coo():
+                # Compute B = M^{-1} explicitly
                 Ieye = np.eye(n)
                 if cholesky_backend is not None:
-                    B = cholesky_backend.solve(factor, Ieye)
+                    B_explicit = cholesky_backend.solve(factor, Ieye)
                 else:
-                    B = solve_chol_multi_rhs(factor[1], Ieye)
-                B = 0.5 * (B + B.T)
+                    B_explicit = solve_chol_multi_rhs(factor[1], Ieye)
+                B_explicit = 0.5 * (B_explicit + B_explicit.T)
+
+            # Build Hessian-vector product
+            if basis.is_sparse_coo() and not use_precond:
+                # Implicit Hv (no explicit B needed)
+                Hv = hessvec_spd_coo_implicit_factory(factor, basis, drop_tol=hv_drop_tol, cholesky_backend=cholesky_backend)
+            else:
+                # Explicit B available
                 def Hv(v):
-                    # Hv = tr(Dk * (B D(v) B)) = trace_with(B D(v) B)
                     Dv = basis.build_C(v)
-                    S = B @ Dv @ B
+                    S = B_explicit @ Dv @ B_explicit
                     return basis.trace_with(S)
 
             def mv(v):
                 return Hv(v) + lam * np.asarray(v, dtype=float)
 
-            d, cg_info = cg_solve(mv, -g, tol=cg_tol, max_iter=min(cg_max_iter, max(10, m)))
+            # Build diagonal preconditioner if requested
+            M_inv = None
+            if use_precond:
+                # Compute diagonal of Hessian: H_kk = tr(D_k B D_k B)
+                diag_H = compute_hessian_diagonal_coo_fast(B_explicit, basis)
+                # Add damping to diagonal (same as we add to Hv)
+                diag_H_damped = diag_H + lam
+                # Clamp to avoid division by zero
+                diag_H_damped = np.maximum(diag_H_damped, 1e-12)
+                # Preconditioner: M_inv(r) = r / diag(H)
+                def M_inv(r):
+                    return r / diag_H_damped
+
+                if verbose and it == 0:
+                    cond_diag = np.max(diag_H_damped) / np.min(diag_H_damped)
+                    print(f"{pfx}  [Precond] diag(H) range: [{np.min(diag_H):.2e}, {np.max(diag_H):.2e}], cond={cond_diag:.2e}")
+
+            d, cg_info = cg_solve(mv, -g, tol=cg_tol, max_iter=min(cg_max_iter, max(10, m)), M_inv=M_inv)
 
             if verbose:
                 print(f"{pfx}  [CG] iters={cg_info['iters']} converged={cg_info['converged']} rel_res={cg_info['rel_res']:.2e}")

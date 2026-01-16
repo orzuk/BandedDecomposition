@@ -1400,9 +1400,10 @@ if __name__ == "__main__":
                         help="Matrix dimension (default: 100). For mixed_fbm, N=n//2 time steps.")
     parser.add_argument("--solver", type=str, choices=["primal", "dual"], default="primal",
                         help="Solver for full-info: 'primal' or 'dual' (Newton on S⊥)")
-    parser.add_argument("--method", type=str, choices=["newton", "newton-cg", "quasi-newton", "lbfgs"], default="newton-cg",
+    parser.add_argument("--method", type=str, choices=["newton", "newton-cg", "precond-newton-cg", "quasi-newton", "lbfgs"], default="newton-cg",
                         help="Optimization method: 'newton' (auto-switches to newton-cg for large m), "
-                             "'newton-cg' (matrix-free), 'quasi-newton' (BFGS), or 'lbfgs' (L-BFGS, fastest for large N)")
+                             "'newton-cg' (matrix-free), 'precond-newton-cg' (with diagonal preconditioning), "
+                             "'quasi-newton' (BFGS), or 'lbfgs' (L-BFGS)")
     parser.add_argument("--strategy", type=str, choices=["both", "markovian", "full"], default="both",
                         help="Which strategies to run: 'both', 'markovian' (fast, O(N)), or 'full' (slow, O(N²))")
     parser.add_argument("--hres", type=float, default=0.1,
