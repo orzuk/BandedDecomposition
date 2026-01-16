@@ -83,9 +83,18 @@ def append_result(H, val_sum, val_markov, val_full, params):
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)  # Release lock
 
 
-def load_results_for_params(model, n, alpha, strategy):
+def load_results_for_params(model, n, alpha, strategy='all'):
     """
     Load results from master CSV filtered by parameters.
+
+    Parameters
+    ----------
+    model : str
+    n : int
+    alpha : float
+    strategy : str
+        'all' to merge results from all strategies (default for plotting),
+        or 'both', 'markovian', 'full' to filter by specific strategy.
 
     Returns
     -------
@@ -100,13 +109,14 @@ def load_results_for_params(model, n, alpha, strategy):
 
     df = pd.read_csv(filename)
 
-    # Filter by parameters
+    # Filter by parameters (optionally by strategy)
     mask = (
         (df['model'] == model) &
         (df['n'] == n) &
-        (np.isclose(df['alpha'], alpha)) &
-        (df['strategy'] == strategy)
+        (np.isclose(df['alpha'], alpha))
     )
+    if strategy != 'all':
+        mask = mask & (df['strategy'] == strategy)
     df_filtered = df[mask].sort_values('H')
 
     if len(df_filtered) == 0:
@@ -1045,6 +1055,16 @@ def invest_value_mixed_fbm(H, N, alpha, delta_t, strategy, method="newton", solv
                 info["iters"] = solve_info["iters"]
                 info["method"] = "lbfgs"
                 info["x"] = x
+            elif method in ("newton", "newton-cg") and strategy == "markovian":
+                # Use BlockedNewtonSolver for markovian - exploits Toeplitz structure
+                from toeplitz_solver import BlockedNewtonSolver
+                t0 = time.time()
+                solver_obj = BlockedNewtonSolver(N, H, alpha, delta_t, verbose=verbose)
+                B, _, x, solve_info = solver_obj.solve(tol=tol, max_iter=max_iter, method=method)
+                t_solve = time.time() - t0
+                info["iters"] = solve_info["iters"]
+                info["method"] = method
+                info["x"] = x
             elif method == "lbfgs":
                 # L-BFGS only works efficiently for markovian strategy (handled above)
                 # For full strategy, Newton-CG is actually faster because:
@@ -1057,7 +1077,7 @@ def invest_value_mixed_fbm(H, N, alpha, delta_t, strategy, method="newton", solv
                 B, _, x, decomp_info = constrained_decomposition(
                     A=Lambda, basis=basis, method="newton-cg",
                     tol=tol, max_iter=max_iter, verbose=verbose, return_info=True,
-                    x_init=x_init
+                    x_init=x_init, cg_max_iter=cg_max_iter
                 )
                 t_solve = time.time() - t0
                 info["iters"] = decomp_info["iters"]
@@ -1068,7 +1088,7 @@ def invest_value_mixed_fbm(H, N, alpha, delta_t, strategy, method="newton", solv
                 B, _, x, decomp_info = constrained_decomposition(
                     A=Lambda, basis=basis, method=method,
                     tol=tol, max_iter=max_iter, verbose=verbose, return_info=True,
-                    x_init=x_init
+                    x_init=x_init, cg_max_iter=cg_max_iter
                 )
                 t_solve = time.time() - t0
                 info["iters"] = decomp_info["iters"]
@@ -1528,7 +1548,8 @@ if __name__ == "__main__":
 
         for model_i, n_i, alpha_i in combos:
             n_i = int(n_i)
-            H_vec_i, val_markov_i, val_general_i, val_sum_i = load_results_for_params(model_i, n_i, alpha_i, 'both')
+            # Use 'all' to merge results from 'both', 'full', and 'markovian' strategy runs
+            H_vec_i, val_markov_i, val_general_i, val_sum_i = load_results_for_params(model_i, n_i, alpha_i, 'all')
             if H_vec_i is None or len(H_vec_i) == 0:
                 print(f"  Skipping {model_i}, n={n_i}, alpha={alpha_i}: no data")
                 continue
@@ -1587,7 +1608,7 @@ if __name__ == "__main__":
             hmax_str = f"{plot_hmax:.2f}" if plot_hmax is not None else "1.00"
             h_range_str = f"H_{hmin_str}_{hmax_str}"
             alpha_str = f"_a{alpha_i:.1f}" if model_i == "mixed_fbm" and alpha_i != 1.0 else ""
-            out_png = fig_dir / f"value_{model_i}_n_{n_i}_{h_range_str}{alpha_str}_both.png"
+            out_png = fig_dir / f"value_{model_i}_n_{n_i}_{h_range_str}{alpha_str}_all.png"
             plt.savefig(out_png, dpi=150)
             plt.close()
             print(f"  Saved: {out_png}")
