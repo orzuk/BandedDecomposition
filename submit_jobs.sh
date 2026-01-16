@@ -139,6 +139,15 @@ echo "H range: ${HMIN} to ${HMAX} (step ${HRES})"
 echo "Time: \$(date)"
 echo ""
 
+# Use tighter tolerance for markovian (fast), looser for full (slow)
+if [ "${strategy}" == "markovian" ]; then
+    TOL="1e-6"
+    CG_MAX="200"
+else
+    TOL="1e-4"      # Looser tolerance for faster convergence
+    CG_MAX="1000"   # More CG iterations for ill-conditioned cases
+fi
+
 python finance_example.py \\
     --model ${model} \\
     --n ${n} \\
@@ -150,7 +159,9 @@ python finance_example.py \\
     --hres ${HRES} \\
     --incremental \\
     --max-cond 1e8 \\
-    --sort-h-by-center
+    --sort-h-by-center \\
+    --tol ${TOL} \\
+    --cg-max-iter ${CG_MAX}
 
 echo ""
 echo "Job completed at: \$(date)"

@@ -732,7 +732,7 @@ def invest_value_mixed_fbm_blocked(H, N, alpha, delta_t, strategy, method="newto
             B, _, x, decomp_info = constrained_decomposition(
                 A=Lambda, basis=basis, method=actual_method,
                 tol=tol, max_iter=max_iter, verbose=verbose, return_info=True,
-                x_init=x_init
+                x_init=x_init, cg_max_iter=cg_max_iter
             )
             info["iters"] = decomp_info["iters"]
             info["method"] = decomp_info.get("used_method", actual_method)
@@ -799,7 +799,7 @@ def make_mixed_fbm_markovian_basis(N: int):
 
 
 def invest_value_fbm(H, n, strategy, method="newton", Sigma=None, Lambda=None, basis=None,
-                     tol=1e-8, max_iter=500, verbose=False, x_init=None):
+                     tol=1e-8, max_iter=500, verbose=False, x_init=None, cg_max_iter=200):
     """
     Compute investment value for pure fBM model with a given strategy.
 
@@ -882,7 +882,7 @@ def invest_value_fbm(H, n, strategy, method="newton", Sigma=None, Lambda=None, b
             B, _, x, decomp_info = constrained_decomposition(
                 A=Lambda, basis=basis, method=actual_method,
                 tol=tol, max_iter=max_iter, verbose=verbose, return_info=True,
-                x_init=x_init
+                x_init=x_init, cg_max_iter=cg_max_iter
             )
             info["iters"] = decomp_info["iters"]
             info["method"] = decomp_info.get("used_method", actual_method)
@@ -905,7 +905,7 @@ def invest_value_fbm(H, n, strategy, method="newton", Sigma=None, Lambda=None, b
 
 def invest_value_mixed_fbm(H, N, alpha, delta_t, strategy, method="newton", solver="primal",
                            Sigma=None, Lambda=None, basis=None, basis_perp=None,
-                           tol=1e-8, max_iter=500, verbose=False, x_init=None):
+                           tol=1e-8, max_iter=500, verbose=False, x_init=None, cg_max_iter=200):
     """
     Compute investment value for mixed fBM model with a given strategy.
 
@@ -1435,6 +1435,9 @@ if __name__ == "__main__":
                         help="Maximum condition number for Sigma matrix. Skip H values exceeding this (default: 1e6).")
     parser.add_argument("--cg-max-iter", type=int, default=500,
                         help="Maximum CG iterations for newton-cg solver (default: 500).")
+    parser.add_argument("--tol", type=float, default=1e-6,
+                        help="Convergence tolerance for optimization (default: 1e-6). "
+                             "Try 1e-4 for faster but less precise results.")
     parser.add_argument("--sort-h-by-center", action="store_true",
                         help="Sort H values by distance from 0.5 (start with easier cases near center). "
                              "Useful when convergence is slow at extreme H values.")
@@ -1461,6 +1464,7 @@ if __name__ == "__main__":
     incremental = args.incremental
     max_cond = args.max_cond
     cg_max_iter = args.cg_max_iter
+    tol = args.tol
     sort_h_by_center = args.sort_h_by_center
     verbose_solver = args.verbose
 
@@ -1608,7 +1612,7 @@ if __name__ == "__main__":
         print(f"\n{'='*60}")
         print(f"INCREMENTAL mode: {model_type}, n={n}, strategy={strategy}")
         print(f"H range: [{hmin}, {hmax}) with step {hres}, alpha={alpha}")
-        print(f"Max condition number: {max_cond:.0e}, CG max iter: {cg_max_iter}")
+        print(f"Max condition number: {max_cond:.0e}, CG max iter: {cg_max_iter}, tol: {tol:.0e}")
         print(f"Results file: {results_file}")
         print(f"{'='*60}\n")
 
@@ -1678,7 +1682,7 @@ if __name__ == "__main__":
                     v_markov, info = invest_value_fbm(
                         H=H, n=n, strategy="markovian", method=method,
                         Sigma=Sigma, basis=basis_markov,
-                        tol=1e-6, verbose=verbose_solver
+                        tol=tol, verbose=verbose_solver, cg_max_iter=cg_max_iter
                     )
                     if info["error"]:
                         print(f"  Markovian: FAILED - {info['error']}")
@@ -1712,7 +1716,7 @@ if __name__ == "__main__":
                     v_markov, info = invest_value_mixed_fbm(
                         H=H, N=N, alpha=alpha, delta_t=delta_t, strategy="markovian",
                         method=method, Sigma=Sigma, Lambda=Lambda, basis=basis_markov,
-                        tol=1e-6, verbose=verbose_solver
+                        tol=tol, verbose=verbose_solver, cg_max_iter=cg_max_iter
                     )
                     if info["error"]:
                         print(f"  Markovian: FAILED - {info['error']}")
@@ -1725,7 +1729,7 @@ if __name__ == "__main__":
                     v_full, info = invest_value_mixed_fbm(
                         H=H, N=N, alpha=alpha, delta_t=delta_t, strategy="full",
                         method=method, Sigma=Sigma, Lambda=Lambda, basis=basis_full,
-                        tol=1e-6, verbose=verbose_solver
+                        tol=tol, verbose=verbose_solver, cg_max_iter=cg_max_iter
                     )
                     if info["error"]:
                         print(f"  Full-info: FAILED - {info['error']}")
