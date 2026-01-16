@@ -1238,6 +1238,7 @@ class BlockedNewtonSolver:
             print(f"  Block B: {'ON' if use_block_opt else 'OFF'}, Block Hv: {'ON' if use_block_hv else 'OFF'}")
             print(f"  Initial max|g| = {np.max(np.abs(g)):.3e}")
 
+        t_iter_start = time.time()
         for it in range(max_iter):
             max_g = np.max(np.abs(g))
 
@@ -1323,8 +1324,11 @@ class BlockedNewtonSolver:
             t_gradient += 0  # Gradient computed in line search
 
             if self.verbose and (it % 10 == 0 or it < 5):
+                t_iter = time.time() - t_iter_start
                 hess_label = "Hess" if method == "newton" else "CG"
-                print(f"Iter {it}: max|g| = {max_g:.3e}, step = {step:.3f}, t={time.time() - t_start:.1f}s (B={t_B_compute:.1f}s, grad={t_gradient:.1f}s, {hess_label}={t_hessian:.1f}s, ls={t_linesearch:.1f}s)")
+                print(f"Iter {it}: max|g| = {max_g:.3e}, step = {step:.3f}, iter_t={t_iter:.1f}s, total_t={time.time() - t_start:.1f}s")
+
+            t_iter_start = time.time()  # Reset for next iteration
 
         C = self.build_C(x)
         t_total = time.time() - t_start
