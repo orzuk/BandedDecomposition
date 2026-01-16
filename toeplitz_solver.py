@@ -1242,14 +1242,16 @@ class BlockedNewtonSolver:
         # Reuse throughout iterations - preconditioner doesn't need to be exact
         diag_H_precond = None
         M_linop = None
+        t_precond = 0.0
         if use_precond and method == "newton-cg":
             from scipy.sparse.linalg import LinearOperator
             t0_precond = time.time()
             diag_H_precond = self.compute_hessian_diagonal(B, use_block_hv)
             diag_H_safe = np.maximum(diag_H_precond, 1e-10)
             M_linop = LinearOperator((self.m, self.m), matvec=lambda v, d=diag_H_safe: v / d)
+            t_precond = time.time() - t0_precond
             if self.verbose:
-                print(f"  [Precond] computed in {time.time() - t0_precond:.1f}s, diag(H) range: [{diag_H_precond.min():.2e}, {diag_H_precond.max():.2e}]")
+                print(f"  [Precond] computed in {t_precond:.1f}s, diag(H) range: [{diag_H_precond.min():.2e}, {diag_H_precond.max():.2e}]")
 
         t_iter_start = time.time()
         for it in range(max_iter):
@@ -1282,9 +1284,12 @@ class BlockedNewtonSolver:
                 H_linop = LinearOperator((self.m, self.m), matvec=Hv_op)
 
                 # Use precomputed diagonal preconditioner (M_linop computed before loop)
-                d, cg_info = cg(H_linop, -g, rtol=1e-6, maxiter=self.m, M=M_linop)
-                if self.verbose:
-                    print(f"  [CG] info={cg_info} (0=converged, >0=maxiter)")
+                # Track CG iterations via callback
+                cg_iters = [0]
+                def cg_callback(xk):
+                    cg_iters[0] += 1
+                d, cg_info = cg(H_linop, -g, rtol=1e-6, maxiter=self.m, M=M_linop, callback=cg_callback)
+                cg_iter_count = cg_iters[0]
             t_hessian += time.time() - t0
 
             # Line search with Armijo-like condition: require gradient norm to decrease
@@ -1328,8 +1333,11 @@ class BlockedNewtonSolver:
 
             if self.verbose and (it % 10 == 0 or it < 5):
                 t_iter = time.time() - t_iter_start
-                hess_label = "Hess" if method == "newton" else "CG"
-                print(f"Iter {it}: max|g| = {max_g:.3e}, step = {step:.3f}, iter_t={t_iter:.1f}s, total_t={time.time() - t_start:.1f}s")
+                if method == "newton":
+                    print(f"Iter {it}: max|g| = {max_g:.3e}, step = {step:.3f}, iter_t={t_iter:.1f}s, total_t={time.time() - t_start:.1f}s")
+                else:
+                    cg_status = "conv" if cg_info == 0 else "max"
+                    print(f"Iter {it}: max|g| = {max_g:.3e}, step = {step:.3f}, CG={cg_iter_count}({cg_status}), iter_t={t_iter:.1f}s, total_t={time.time() - t_start:.1f}s")
 
             t_iter_start = time.time()  # Reset for next iteration
 
@@ -1342,6 +1350,7 @@ class BlockedNewtonSolver:
             'final_max_g': np.max(np.abs(g)),
             'time': t_total,
             'timing': {
+                'precond': t_precond,
                 'B_compute': t_B_compute + t_linesearch,  # Line search includes B computation
                 'gradient': t_gradient,
                 'hessian_cg': t_hessian,

@@ -1068,6 +1068,7 @@ def invest_value_mixed_fbm(H, N, alpha, delta_t, strategy, method="newton", solv
                 info["iters"] = solve_info["iters"]
                 info["method"] = method
                 info["x"] = x
+                info["timing_detail"] = solve_info.get("timing", {})
             elif method == "lbfgs":
                 # L-BFGS only works efficiently for markovian strategy (handled above)
                 # For full strategy, Newton-CG is actually faster because:
@@ -1110,10 +1111,18 @@ def invest_value_mixed_fbm(H, N, alpha, delta_t, strategy, method="newton", solv
 
     info["time"] = time.time() - t_start
     if verbose:
-        print(
-            f"  [timing] sigma={t_sigma:.3f}s lambda={t_lambda:.3f}s "
-            f"basis={t_basis:.3f}s solve={t_solve:.3f}s logdet={t_logdet:.3f}s"
-        )
+        timing_detail = info.get("timing_detail", {})
+        t_precond = timing_detail.get("precond", 0.0)
+        if t_precond > 0:
+            print(
+                f"  [timing] sigma={t_sigma:.3f}s lambda={t_lambda:.3f}s "
+                f"basis={t_basis:.3f}s precond={t_precond:.3f}s solve={t_solve:.3f}s logdet={t_logdet:.3f}s"
+            )
+        else:
+            print(
+                f"  [timing] sigma={t_sigma:.3f}s lambda={t_lambda:.3f}s "
+                f"basis={t_basis:.3f}s solve={t_solve:.3f}s logdet={t_logdet:.3f}s"
+            )
     return value, info
 
 
