@@ -1476,6 +1476,8 @@ if __name__ == "__main__":
                              "Useful when convergence is slow at extreme H values.")
     parser.add_argument("--verbose", action="store_true",
                         help="Enable verbose output from optimization solvers (show iteration progress).")
+    parser.add_argument("--heatmap", action="store_true",
+                        help="Generate decomposition heatmap (slow, disabled by default).")
     args = parser.parse_args()
 
     model_type = args.model
@@ -1866,33 +1868,34 @@ if __name__ == "__main__":
     print(f"\nSaved value figure to: {out_png}")
 
 
-    # ---- Save decomposition heatmaps for a chosen H ----
-    H0 = 0.8  # pick one (or loop over a few)
+    # ---- Save decomposition heatmaps for a chosen H (optional, slow) ----
+    if args.heatmap:
+        H0 = 0.8  # pick one (or loop over a few)
 
-    if model_type == "fbm":
-        A = spd_fractional_BM(n, H=H0, T=1.0, diff_flag=True)
-        A_inv = spd_inverse(A)
-        basis = TridiagC_Basis(n)
-    else:  # mixed_fbm
-        Sigma = spd_mixed_fbm(N, H=H0, alpha=alpha, delta_t=delta_t)
-        A_inv = spd_inverse(Sigma)
-        basis = make_mixed_fbm_markovian_basis(N)  # Use Markovian for heatmap
+        if model_type == "fbm":
+            A = spd_fractional_BM(n, H=H0, T=1.0, diff_flag=True)
+            A_inv = spd_inverse(A)
+            basis = TridiagC_Basis(n)
+        else:  # mixed_fbm
+            Sigma = spd_mixed_fbm(N, H=H0, alpha=alpha, delta_t=delta_t)
+            A_inv = spd_inverse(Sigma)
+            basis = make_mixed_fbm_markovian_basis(N)  # Use Markovian for heatmap
 
-    B0, C0, x0 = constrained_decomposition(
-        A=A_inv,
-        basis=basis,
-        method="newton",
-        tol=1e-6,
-        max_iter=500,
-        verbose=False
-    )
+        B0, C0, x0 = constrained_decomposition(
+            A=A_inv,
+            basis=basis,
+            method="newton",
+            tol=1e-6,
+            max_iter=500,
+            verbose=False
+        )
 
-    out_heat = fig_dir / f"heatmap_{model_type}_H_{H0:.2f}_n_{n}.png"
-    plot_decomposition_heatmaps(
-        A=A_inv,
-        B=B0,
-        C=C0,
-        basis=basis,
-        out_file=out_heat,
-    )
-    print(f"Saved heatmap to: {out_heat}")
+        out_heat = fig_dir / f"heatmap_{model_type}_H_{H0:.2f}_n_{n}.png"
+        plot_decomposition_heatmaps(
+            A=A_inv,
+            B=B0,
+            C=C0,
+            basis=basis,
+            out_file=out_heat,
+        )
+        print(f"Saved heatmap to: {out_heat}")
