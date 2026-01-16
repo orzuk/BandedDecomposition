@@ -1283,34 +1283,44 @@ class BlockedNewtonSolver:
                     print(f"  [CG] info={cg_info} (0=converged, >0=maxiter)")
             t_hessian += time.time() - t0
 
-            # Line search (Cholesky success implies SPD)
+            # Line search with Armijo-like condition: require gradient norm to decrease
             t0 = time.time()
             step = 1.0
             B_new = None
             L_info_new = None
-            for _ in range(20):
+            g_new = None
+            current_gnorm = np.max(np.abs(g))
+
+            for ls_iter in range(20):
                 x_new = x + step * d
 
                 try:
                     B_new, L_info_new = compute_B(x_new)
-                    # Cholesky succeeded, so M is SPD, hence B is SPD
-                    break
+                    # Cholesky succeeded, check if gradient improves
+                    g_new = self.compute_gradient(B_new)
+                    new_gnorm = np.max(np.abs(g_new))
+
+                    # Accept if gradient norm decreases (with small tolerance for numerical noise)
+                    if new_gnorm < current_gnorm * 1.01:
+                        break
+                    else:
+                        # Gradient didn't improve, try smaller step
+                        step *= 0.5
+                        B_new = None
                 except np.linalg.LinAlgError:
                     step *= 0.5
             t_linesearch += time.time() - t0
 
             if B_new is None:
                 if self.verbose:
-                    print(f"Line search failed at iter {it}")
+                    print(f"Line search failed at iter {it} (couldn't decrease gradient)")
                 break
 
             x = x_new
             B = B_new
             L_info = L_info_new
-
-            t0 = time.time()
-            g = self.compute_gradient(B)
-            t_gradient += time.time() - t0
+            g = g_new  # Already computed in line search
+            t_gradient += 0  # Gradient computed in line search
 
             if self.verbose and (it % 10 == 0 or it < 5):
                 hess_label = "Hess" if method == "newton" else "CG"
