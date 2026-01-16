@@ -1841,13 +1841,34 @@ if __name__ == "__main__":
             print(f"Plotting H range: [{H_plot[0]:.2f}, {H_plot[-1]:.2f}] ({len(H_plot)} points)")
 
     # --- Plot ---
+    # Use filled markers for computed values, empty markers for missing values
     plt.figure(figsize=(8, 5))
-    if val_markov_plot is not None:
-        plt.plot(H_plot, val_markov_plot, 'b-o', label="Markovian strategy", markersize=4)
-    if val_general_plot is not None:
-        plt.plot(H_plot, val_general_plot, 'r-s', label="Full-information strategy", markersize=4)
-    if val_sum_plot is not None:
-        plt.plot(H_plot, val_sum_plot, 'g-^', label="Sum strategy (no decomp)", markersize=4)
+
+    def plot_with_missing(H, vals, color, marker, label):
+        """Plot computed values with filled markers, missing with empty markers."""
+        if vals is None:
+            return
+        computed_mask = ~np.isnan(vals)
+        missing_mask = np.isnan(vals)
+
+        # Computed values: filled markers with line
+        if np.any(computed_mask):
+            plt.plot(H[computed_mask], vals[computed_mask],
+                    color=color, linestyle='-', marker=marker,
+                    markersize=5, label=label, markerfacecolor=color)
+
+        # Missing values: empty markers at bottom of plot (y=0 or min)
+        if np.any(missing_mask):
+            # Use small y value to show missing points at bottom
+            y_missing = np.zeros(np.sum(missing_mask))
+            plt.plot(H[missing_mask], y_missing,
+                    color=color, linestyle='', marker=marker,
+                    markersize=5, markerfacecolor='none', markeredgecolor=color,
+                    alpha=0.5, label=f'{label} (missing)' if np.any(computed_mask) else label)
+
+    plot_with_missing(H_plot, val_markov_plot, 'blue', 'o', 'Markovian')
+    plot_with_missing(H_plot, val_general_plot, 'red', 's', 'Full-information')
+    plot_with_missing(H_plot, val_sum_plot, 'green', '^', 'Sum (no decomp)')
     plt.xlabel("Hurst parameter H", fontsize=12)
     plt.ylabel("log(Value)", fontsize=12)
     if model_type == "mixed_fbm":

@@ -23,8 +23,8 @@ ALPHA_VALUES=(1.0 5.0)
 # Only mixed_fbm model
 MODEL="mixed_fbm"
 
-# Only markovian strategy (full is too slow for large n)
-STRATEGY="markovian"
+# All strategies
+STRATEGIES=("markovian" "full")
 
 # Check for dry run
 DRY_RUN=false
@@ -48,22 +48,30 @@ echo "Model: ${MODEL}"
 echo "N values: ${N_VALUES[*]}"
 echo "H values: ${H_VALUES[*]}"
 echo "Alpha values: ${ALPHA_VALUES[*]}"
-echo "Strategy: ${STRATEGY}"
+echo "Strategies: ${STRATEGIES[*]}"
 echo ""
 
 for alpha in "${ALPHA_VALUES[@]}"; do
     for H in "${H_VALUES[@]}"; do
-        # SLURM settings based on expected runtime
-        # Markovian with precond should be fast
-        time="04:00:00"
-        mem="8G"
-        cpus="4"
+        for strategy in "${STRATEGIES[@]}"; do
+            # SLURM settings based on strategy
+            if [ "$strategy" == "markovian" ]; then
+                time="04:00:00"
+                mem="8G"
+                METHOD="precond-newton-cg"
+            else
+                # Full strategy is slower
+                time="12:00:00"
+                mem="16G"
+                METHOD="newton-cg"  # No preconditioning for full
+            fi
+            cpus="4"
 
-        job_name="highres_a${alpha}_H${H}"
-        job_script="${JOBS_DIR}/${job_name}.sh"
+            job_name="highres_a${alpha}_H${H}_${strategy}"
+            job_script="${JOBS_DIR}/${job_name}.sh"
 
-        # Create SLURM job script
-        cat > "$job_script" << EOF
+            # Create SLURM job script
+            cat > "$job_script" << EOF
 #!/bin/bash
 #SBATCH --job-name=${job_name}
 #SBATCH --output=${JOBS_DIR}/${job_name}_%j.out
@@ -78,22 +86,23 @@ cd ${WORK_DIR}
 eval "\$(conda shell.bash hook)"
 conda activate ${CONDA_ENV}
 
-echo "Starting high-res n sweep: alpha=${alpha}, H=${H}"
+echo "Starting high-res n sweep: alpha=${alpha}, H=${H}, strategy=${strategy}"
 echo "N values: ${N_VALUES[*]}"
+echo "Method: ${METHOD}"
 echo "Time: \$(date)"
 echo ""
 
 # Loop over n values
 for n in ${N_VALUES[*]}; do
     echo ""
-    echo "=== n=\${n}, H=${H}, alpha=${alpha} ==="
+    echo "=== n=\${n}, H=${H}, alpha=${alpha}, strategy=${strategy} ==="
 
     python finance_example.py \\
         --model ${MODEL} \\
         --n \${n} \\
         --alpha ${alpha} \\
-        --strategy ${STRATEGY} \\
-        --method precond-newton-cg \\
+        --strategy ${strategy} \\
+        --method ${METHOD} \\
         --hmin ${H} \\
         --hmax \$(echo "${H} + 0.01" | bc) \\
         --hres 0.01 \\
@@ -108,16 +117,17 @@ echo ""
 echo "Job completed at: \$(date)"
 EOF
 
-        chmod +x "$job_script"
+            chmod +x "$job_script"
 
-        if [ "$DRY_RUN" == "true" ]; then
-            echo "[DRY RUN] Would submit: $job_name"
-        else
-            sbatch "$job_script"
-            echo "Submitted: $job_name"
-        fi
+            if [ "$DRY_RUN" == "true" ]; then
+                echo "[DRY RUN] Would submit: $job_name (strategy=$strategy, time=$time)"
+            else
+                sbatch "$job_script"
+                echo "Submitted: $job_name (strategy=$strategy, time=$time)"
+            fi
 
-        ((job_count++))
+            ((job_count++))
+        done
     done
 done
 
