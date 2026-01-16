@@ -130,7 +130,9 @@ for model in "${MODELS[@]}"; do
 #SBATCH --mem=${mem}
 
 cd ${WORK_DIR}
-source ~/.bashrc
+
+# Initialize conda for non-interactive shell
+eval "\$(conda shell.bash hook)"
 conda activate ${CONDA_ENV}
 
 echo "Starting job: ${job_name}"
@@ -156,15 +158,15 @@ python finance_example.py \\
     --n ${n} \\
     ${alpha_arg} \\
     --strategy ${strategy} \\
-    --method ${METHOD} \\
+    --method \${METHOD} \\
     --hmin ${HMIN} \\
     --hmax ${HMAX} \\
     --hres ${HRES} \\
     --incremental \\
     --max-cond 1e8 \\
     --sort-h-by-center \\
-    --tol ${TOL} \\
-    --cg-max-iter ${CG_MAX}
+    --tol \${TOL} \\
+    --cg-max-iter \${CG_MAX}
 
 echo ""
 echo "Job completed at: \$(date)"
