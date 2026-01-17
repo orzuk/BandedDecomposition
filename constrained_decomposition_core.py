@@ -1950,7 +1950,9 @@ def constrained_decomposition(
             print(f"{pfx}iter {it:4d}  phi={phi: .6e}  ||g||={g_norm: .3e}  max|g|={max_abs_g: .3e} time={dt: .3e}")
             start_iter_time = time.perf_counter()
 
-        if max_abs_g < tol:
+        # Require at least 1 iteration to avoid accepting trivial solution x=0
+        # (which can have small gradient for some problem instances)
+        if max_abs_g < tol and it > 0:
             break
 
         # -------------------------
