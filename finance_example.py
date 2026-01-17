@@ -4,6 +4,8 @@ from constrained_decomposition_matrices import *
 from constrained_decomposition_matrices import spd_mixed_fbm_blocked, fgn_cov_toeplitz
 from constrained_decomposition_viz import plot_decomposition_heatmaps
 import matplotlib.pyplot as plt
+import matplotlib
+matplotlib.rcParams['mathtext.fontset'] = 'cm'  # Computer Modern for proper math rendering
 from pathlib import Path
 import math
 import argparse
@@ -1640,7 +1642,7 @@ if __name__ == "__main__":
             if has_sum:
                 ax.plot(H_plot, val_sum_plot, 'g-^', label="Sum (no decomp)", markersize=4)
             ax.set_xlabel(r'$\mathcal{H}$', fontsize=14)
-            ax.set_ylabel(r'$\mathit{v}_N^*$', fontsize=14)
+            ax.set_ylabel(r'$v_N^*$', fontsize=14)
 
             if model_i == "mixed_fbm":
                 N_i = n_i // 2
@@ -1956,7 +1958,7 @@ if __name__ == "__main__":
         plot_with_missing(ax, H_plot, val_general_plot, 'red', 's', 'Full-information')
         plot_with_missing(ax, H_plot, val_sum_plot, 'green', '^', 'Sum (no decomp)')
         ax.set_xlabel(r'$\mathcal{H}$', fontsize=14)
-        ax.set_ylabel(r'$\mathit{v}_N^*$', fontsize=14)
+        ax.set_ylabel(r'$v_N^*$', fontsize=14)
         if model_type == "mixed_fbm":
             if show_title:
                 ax.set_title(f"Mixed fBM: Strategy value vs H (N={N}, α={alpha})", fontsize=13)
