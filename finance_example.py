@@ -1486,6 +1486,8 @@ if __name__ == "__main__":
                         help="Enable verbose output from optimization solvers (show iteration progress).")
     parser.add_argument("--heatmap", action="store_true",
                         help="Generate decomposition heatmap (slow, disabled by default).")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Compute values but don't save to CSV or plot. For diagnostics.")
     args = parser.parse_args()
 
     model_type = args.model
@@ -1505,6 +1507,12 @@ if __name__ == "__main__":
     plot_hmin = args.plot_hmin
     plot_hmax = args.plot_hmax
     incremental = args.incremental
+    dry_run = args.dry_run
+
+    # Dry run implies force rerun and no incremental
+    if dry_run:
+        force_rerun = True
+        incremental = False
     max_cond = args.max_cond
     cg_max_iter = args.cg_max_iter
     tol = args.tol
@@ -1781,8 +1789,9 @@ if __name__ == "__main__":
                     else:
                         print(f"  Full-info: {v_full:.6f} ({info['time']:.2f}s, {info['iters']} iters)")
 
-            # Save incrementally to master CSV
-            append_result(H, v_sum, v_markov, v_full, params)
+            # Save incrementally to master CSV (unless dry run)
+            if not dry_run:
+                append_result(H, v_sum, v_markov, v_full, params)
             n_computed += 1
 
         total_time = time.time() - total_start
@@ -1817,114 +1826,119 @@ if __name__ == "__main__":
                     H_vec, N=N, alpha=alpha, delta_t=delta_t, solver=solver, method=method, strategy=strategy
                 )
 
-        # Save all results to master CSV
-        for i, H in enumerate(H_vec):
-            v_sum = val_sum[i] if val_sum is not None else None
-            v_markov = val_markov[i] if val_markov is not None else None
-            v_full = val_general[i] if val_general is not None else None
-            append_result(H, v_sum, v_markov, v_full, params)
+        # Save all results to master CSV (unless dry run)
+        if not dry_run:
+            for i, H in enumerate(H_vec):
+                v_sum = val_sum[i] if val_sum is not None else None
+                v_markov = val_markov[i] if val_markov is not None else None
+                v_full = val_general[i] if val_general is not None else None
+                append_result(H, v_sum, v_markov, v_full, params)
 
-    # --- Filter data for plotting if plot range specified ---
-    p_hmin = plot_hmin if plot_hmin is not None else H_vec[0]
-    p_hmax = plot_hmax if plot_hmax is not None else H_vec[-1] + 1e-9  # inclusive
-    mask = (H_vec >= p_hmin) & (H_vec <= p_hmax)
-
-    if not np.any(mask):
-        print(f"WARNING: No data in plot range [{p_hmin}, {p_hmax}]. Available: [{H_vec[0]:.2f}, {H_vec[-1]:.2f}]")
+    # --- Skip plotting in dry-run mode ---
+    if dry_run:
+        print("\n[Dry run] Skipping save to CSV and plotting.")
     else:
-        H_plot = H_vec[mask]
-        val_markov_plot = val_markov[mask] if val_markov is not None else None
-        val_general_plot = val_general[mask] if val_general is not None else None
-        val_sum_plot = val_sum[mask] if val_sum is not None else None
+        # --- Filter data for plotting if plot range specified ---
+        p_hmin = plot_hmin if plot_hmin is not None else H_vec[0]
+        p_hmax = plot_hmax if plot_hmax is not None else H_vec[-1] + 1e-9  # inclusive
+        mask = (H_vec >= p_hmin) & (H_vec <= p_hmax)
 
-        if plot_hmin is not None or plot_hmax is not None:
-            print(f"Plotting H range: [{H_plot[0]:.2f}, {H_plot[-1]:.2f}] ({len(H_plot)} points)")
+        if not np.any(mask):
+            print(f"WARNING: No data in plot range [{p_hmin}, {p_hmax}]. Available: [{H_vec[0]:.2f}, {H_vec[-1]:.2f}]")
+        else:
+            H_plot = H_vec[mask]
+            val_markov_plot = val_markov[mask] if val_markov is not None else None
+            val_general_plot = val_general[mask] if val_general is not None else None
+            val_sum_plot = val_sum[mask] if val_sum is not None else None
 
-    # --- Plot ---
-    # Use filled markers for computed values, empty markers for missing values
-    plt.figure(figsize=(8, 5))
+            if plot_hmin is not None or plot_hmax is not None:
+                print(f"Plotting H range: [{H_plot[0]:.2f}, {H_plot[-1]:.2f}] ({len(H_plot)} points)")
 
-    def plot_with_missing(H, vals, color, marker, label):
-        """Plot computed values with filled markers, missing with empty markers."""
-        if vals is None:
-            return
-        computed_mask = ~np.isnan(vals)
-        missing_mask = np.isnan(vals)
+        # --- Plot ---
+        # Use filled markers for computed values, empty markers for missing values
+        plt.figure(figsize=(8, 5))
 
-        # Computed values: filled markers with line
-        if np.any(computed_mask):
-            plt.plot(H[computed_mask], vals[computed_mask],
-                    color=color, linestyle='-', marker=marker,
-                    markersize=5, label=label, markerfacecolor=color)
+        def plot_with_missing(H, vals, color, marker, label):
+            """Plot computed values with filled markers, missing with empty markers."""
+            if vals is None:
+                return
+            computed_mask = ~np.isnan(vals)
+            missing_mask = np.isnan(vals)
 
-        # Missing values: empty markers at bottom of plot (y=0 or min)
-        if np.any(missing_mask):
-            # Use small y value to show missing points at bottom
-            y_missing = np.zeros(np.sum(missing_mask))
-            plt.plot(H[missing_mask], y_missing,
-                    color=color, linestyle='', marker=marker,
-                    markersize=5, markerfacecolor='none', markeredgecolor=color,
-                    alpha=0.5, label=f'{label} (missing)' if np.any(computed_mask) else label)
+            # Computed values: filled markers with line
+            if np.any(computed_mask):
+                plt.plot(H[computed_mask], vals[computed_mask],
+                        color=color, linestyle='-', marker=marker,
+                        markersize=5, label=label, markerfacecolor=color)
 
-    plot_with_missing(H_plot, val_markov_plot, 'blue', 'o', 'Markovian')
-    plot_with_missing(H_plot, val_general_plot, 'red', 's', 'Full-information')
-    plot_with_missing(H_plot, val_sum_plot, 'green', '^', 'Sum (no decomp)')
-    plt.xlabel("Hurst parameter H", fontsize=12)
-    plt.ylabel("log(Value)", fontsize=12)
-    if model_type == "mixed_fbm":
-        plt.title(f"Mixed fBM: Strategy value vs H (N={N}, α={alpha})", fontsize=13)
-        # Only show H=3/4 line if it's in the plotted range
-        if H_plot[0] <= 0.75 <= H_plot[-1]:
-            plt.axvline(x=0.75, color='gray', linestyle='--', alpha=0.5, label='H=3/4 (arbitrage-free boundary)')
-    else:
-        plt.title(f"fBM: Strategy value vs H (n={n})", fontsize=13)
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
+            # Missing values: empty markers at bottom of plot (y=0 or min)
+            if np.any(missing_mask):
+                # Use small y value to show missing points at bottom
+                y_missing = np.zeros(np.sum(missing_mask))
+                plt.plot(H[missing_mask], y_missing,
+                        color=color, linestyle='', marker=marker,
+                        markersize=5, markerfacecolor='none', markeredgecolor=color,
+                        alpha=0.5, label=f'{label} (missing)' if np.any(computed_mask) else label)
 
-    # --- Save in figs/ next to this script ---
-    here = Path(__file__).resolve().parent
-    fig_dir = here / "figs" / model_type
-    fig_dir.mkdir(parents=True, exist_ok=True)
+        plot_with_missing(H_plot, val_markov_plot, 'blue', 'o', 'Markovian')
+        plot_with_missing(H_plot, val_general_plot, 'red', 's', 'Full-information')
+        plot_with_missing(H_plot, val_sum_plot, 'green', '^', 'Sum (no decomp)')
+        plt.xlabel("Hurst parameter H", fontsize=12)
+        plt.ylabel("log(Value)", fontsize=12)
+        if model_type == "mixed_fbm":
+            plt.title(f"Mixed fBM: Strategy value vs H (N={N}, α={alpha})", fontsize=13)
+            # Only show H=3/4 line if it's in the plotted range
+            if H_plot[0] <= 0.75 <= H_plot[-1]:
+                plt.axvline(x=0.75, color='gray', linestyle='--', alpha=0.5, label='H=3/4 (arbitrage-free boundary)')
+        else:
+            plt.title(f"fBM: Strategy value vs H (n={n})", fontsize=13)
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
 
-    # Always include H range in filename for consistency
-    hmin_str = f"{plot_hmin:.2f}" if plot_hmin is not None else "0.00"
-    hmax_str = f"{plot_hmax:.2f}" if plot_hmax is not None else "1.00"
-    h_range_str = f"H_{hmin_str}_{hmax_str}"
-    alpha_str = f"_a{alpha:.1f}" if model_type == "mixed_fbm" and alpha != 1.0 else ""
-    out_png = fig_dir / f"value_{model_type}_n_{n}_{h_range_str}{alpha_str}_{strategy}.png"
-    plt.savefig(out_png, dpi=150)
-    print(f"\nSaved value figure to: {out_png}")
+        # --- Save in figs/ next to this script ---
+        here = Path(__file__).resolve().parent
+        fig_dir = here / "figs" / model_type
+        fig_dir.mkdir(parents=True, exist_ok=True)
+
+        # Always include H range in filename for consistency
+        hmin_str = f"{plot_hmin:.2f}" if plot_hmin is not None else "0.00"
+        hmax_str = f"{plot_hmax:.2f}" if plot_hmax is not None else "1.00"
+        h_range_str = f"H_{hmin_str}_{hmax_str}"
+        alpha_str = f"_a{alpha:.1f}" if model_type == "mixed_fbm" and alpha != 1.0 else ""
+        out_png = fig_dir / f"value_{model_type}_n_{n}_{h_range_str}{alpha_str}_{strategy}.png"
+        plt.savefig(out_png, dpi=150)
+        print(f"\nSaved value figure to: {out_png}")
 
 
-    # ---- Save decomposition heatmaps for a chosen H (optional, slow) ----
-    if args.heatmap:
-        H0 = 0.8  # pick one (or loop over a few)
+        # ---- Save decomposition heatmaps for a chosen H (optional, slow) ----
+        if args.heatmap:
+            H0 = 0.8  # pick one (or loop over a few)
 
-        if model_type == "fbm":
-            A = spd_fractional_BM(n, H=H0, T=1.0, diff_flag=True)
-            A_inv = spd_inverse(A)
-            basis = TridiagC_Basis(n)
-        else:  # mixed_fbm
-            Sigma = spd_mixed_fbm(N, H=H0, alpha=alpha, delta_t=delta_t)
-            A_inv = spd_inverse(Sigma)
-            basis = make_mixed_fbm_markovian_basis(N)  # Use Markovian for heatmap
+            if model_type == "fbm":
+                A = spd_fractional_BM(n, H=H0, T=1.0, diff_flag=True)
+                A_inv = spd_inverse(A)
+                basis = TridiagC_Basis(n)
+            else:  # mixed_fbm
+                Sigma = spd_mixed_fbm(N, H=H0, alpha=alpha, delta_t=delta_t)
+                A_inv = spd_inverse(Sigma)
+                basis = make_mixed_fbm_markovian_basis(N)  # Use Markovian for heatmap
 
-        B0, C0, x0 = constrained_decomposition(
-            A=A_inv,
-            basis=basis,
-            method="newton",
-            tol=1e-6,
-            max_iter=500,
-            verbose=False
-        )
+            B0, C0, x0 = constrained_decomposition(
+                A=A_inv,
+                basis=basis,
+                method="newton",
+                tol=1e-6,
+                max_iter=500,
+                verbose=False
+            )
 
-        out_heat = fig_dir / f"heatmap_{model_type}_H_{H0:.2f}_n_{n}.png"
-        plot_decomposition_heatmaps(
-            A=A_inv,
-            B=B0,
-            C=C0,
-            basis=basis,
-            out_file=out_heat,
-        )
-        print(f"Saved heatmap to: {out_heat}")
+            out_heat = fig_dir / f"heatmap_{model_type}_H_{H0:.2f}_n_{n}.png"
+            plot_decomposition_heatmaps(
+                A=A_inv,
+                B=B0,
+                C=C0,
+                basis=basis,
+                out_file=out_heat,
+            )
+            print(f"Saved heatmap to: {out_heat}")

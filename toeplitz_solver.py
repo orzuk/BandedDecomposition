@@ -1259,7 +1259,7 @@ class BlockedNewtonSolver:
 
             if max_g < tol:
                 if self.verbose:
-                    print(f"Converged at iter {it}: max|g| = {max_g:.3e}")
+                    print(f"Converged at iter {it}: max|g| = {max_g:.3e} (tol={tol:.1e})")
                 break
 
             t0 = time.time()
@@ -1523,7 +1523,7 @@ class BlockedNewtonSolver:
 
         if self.verbose:
             print(f"L-BFGS finished: {result.nit} iters, {func_evals} f-evals, {grad_evals} g-evals")
-            print(f"  Final max|g| = {np.max(np.abs(g)):.3e}, converged={result.success}")
+            print(f"  Final max|g| = {np.max(np.abs(g)):.3e}, converged={result.success} (tol={tol:.1e})")
 
         return B, C, x, info
 
@@ -2157,7 +2157,7 @@ def solve_lbfgs_general(Lambda, basis, tol=1e-8, max_iter=500, history_size=10, 
     t_total = time.time() - t_start
 
     if verbose:
-        print(f"  L-BFGS general: {iteration+1} iters, {t_total:.2f}s, converged={converged}")
+        print(f"  L-BFGS general: {iteration+1} iters, {t_total:.2f}s, converged={converged} (tol={tol:.1e})")
 
     # Compute final B and C
     C = build_C(x)
