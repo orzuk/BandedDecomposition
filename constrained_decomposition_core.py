@@ -1616,7 +1616,7 @@ def phi_only_spd(A, x, basis: SymBasis):
 
 
 
-def cg_solve(matvec, b, x0=None, tol=1e-6, max_iter=200, M_inv=None):
+def cg_solve(matvec, b, x0=None, tol=1e-6, max_iter=200, M_inv=None, verbose=False):
     """
     Conjugate Gradient for SPD linear system A x = b, given only matvec(x)=A@x.
 
@@ -1627,6 +1627,7 @@ def cg_solve(matvec, b, x0=None, tol=1e-6, max_iter=200, M_inv=None):
       tol: relative tolerance on residual norm ||r|| <= tol*||b||
       max_iter: max CG iterations
       M_inv: optional preconditioner callable(z)->approx A^{-1} z
+      verbose: if True, print progress every 10 iterations
 
     Returns:
       x, info dict with keys: iters, converged, rel_res, abs_res
@@ -1661,6 +1662,10 @@ def cg_solve(matvec, b, x0=None, tol=1e-6, max_iter=200, M_inv=None):
         r -= alpha * Ap
 
         abs_res = float(np.linalg.norm(r))
+
+        if verbose and it % 10 == 0:
+            print(f"    [CG iter {it}] rel_res={abs_res/b_norm:.2e}")
+
         if abs_res <= abs_tol:
             return x, {"iters": it, "converged": True, "rel_res": abs_res / b_norm, "abs_res": abs_res}
 
@@ -2022,7 +2027,7 @@ def constrained_decomposition(
                     cond_diag = np.max(diag_H_damped) / np.min(diag_H_damped)
                     print(f"{pfx}  [Precond] diag(H) range: [{np.min(diag_H):.2e}, {np.max(diag_H):.2e}], cond={cond_diag:.2e}")
 
-            d, cg_info = cg_solve(mv, -g, tol=cg_tol, max_iter=min(cg_max_iter, max(10, m)), M_inv=M_inv)
+            d, cg_info = cg_solve(mv, -g, tol=cg_tol, max_iter=min(cg_max_iter, max(10, m)), M_inv=M_inv, verbose=verbose)
 
             if verbose:
                 print(f"{pfx}  [CG] iters={cg_info['iters']} converged={cg_info['converged']} rel_res={cg_info['rel_res']:.2e}")

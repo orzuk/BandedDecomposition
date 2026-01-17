@@ -1689,6 +1689,10 @@ if __name__ == "__main__":
         n_skipped_done = 0
         n_skipped_cond = 0
 
+        # Warm start: use solution from previous H as initial guess
+        x_markov_prev = None
+        x_full_prev = None
+
         for i, H in enumerate(H_vec):
             H_rounded = round(H, 6)
             if H_rounded in completed_H:
@@ -1734,13 +1738,15 @@ if __name__ == "__main__":
                     v_markov, info = invest_value_fbm(
                         H=H, n=n, strategy="markovian", method=method,
                         Sigma=Sigma, basis=basis_markov,
-                        tol=tol, verbose=verbose_solver, cg_max_iter=cg_max_iter
+                        tol=tol, verbose=verbose_solver, cg_max_iter=cg_max_iter,
+                        x_init=x_markov_prev
                     )
                     if info["error"]:
                         print(f"  Markovian: FAILED - {info['error']}")
                         v_markov = np.nan
                     else:
                         print(f"  Markovian: {v_markov:.6f} ({info['time']:.2f}s, {info['iters']} iters)")
+                        x_markov_prev = info.get("x")  # Update warm start
 
                 # Full strategy (closed-form using A_diff - always well-conditioned!)
                 if run_full:
@@ -1768,26 +1774,30 @@ if __name__ == "__main__":
                     v_markov, info = invest_value_mixed_fbm(
                         H=H, N=N, alpha=alpha, delta_t=delta_t, strategy="markovian",
                         method=method, Sigma=Sigma, Lambda=Lambda, basis=basis_markov,
-                        tol=tol, verbose=verbose_solver, cg_max_iter=cg_max_iter
+                        tol=tol, verbose=verbose_solver, cg_max_iter=cg_max_iter,
+                        x_init=x_markov_prev
                     )
                     if info["error"]:
                         print(f"  Markovian: FAILED - {info['error']}")
                         v_markov = np.nan
                     else:
                         print(f"  Markovian: {v_markov:.6f} ({info['time']:.2f}s, {info['iters']} iters)")
+                        x_markov_prev = info.get("x")  # Update warm start
 
                 # Full-info strategy
                 if run_full:
                     v_full, info = invest_value_mixed_fbm(
                         H=H, N=N, alpha=alpha, delta_t=delta_t, strategy="full",
                         method=method, Sigma=Sigma, Lambda=Lambda, basis=basis_full,
-                        tol=tol, verbose=verbose_solver, cg_max_iter=cg_max_iter
+                        tol=tol, verbose=verbose_solver, cg_max_iter=cg_max_iter,
+                        x_init=x_full_prev
                     )
                     if info["error"]:
                         print(f"  Full-info: FAILED - {info['error']}")
                         v_full = np.nan
                     else:
                         print(f"  Full-info: {v_full:.6f} ({info['time']:.2f}s, {info['iters']} iters)")
+                        x_full_prev = info.get("x")  # Update warm start
 
             # Save incrementally to master CSV (unless dry run)
             if not dry_run:
