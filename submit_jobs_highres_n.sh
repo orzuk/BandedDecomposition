@@ -12,7 +12,7 @@ WORK_DIR="/sci/labs/orzuk/orzuk/github/BandedDecomposition"
 CONDA_ENV="pymol-env"
 
 # High-resolution n values (100 to 2000, step 100)
-N_VALUES=(100 200 300 400 500 600 700 800 900 1000 1100 1200 1300 1400 1500)
+N_VALUES=(100 200 300 400 500 600 700 800 900 1000 1100 1200 1300 1400 1500 1600 1700 1800 1900 2000)
 
 # Fewer H values (well-conditioned range for reliable results)
 H_VALUES=(0.55 0.60 0.65 0.70 0.75 0.80 0.85 0.90)
@@ -54,15 +54,15 @@ echo ""
 for alpha in "${ALPHA_VALUES[@]}"; do
     for H in "${H_VALUES[@]}"; do
         for strategy in "${STRATEGIES[@]}"; do
-            # SLURM settings based on strategy
+            # SLURM settings based on strategy (increased for n up to 2000)
             if [ "$strategy" == "markovian" ]; then
-                time="04:00:00"
+                time="08:00:00"
                 mem="8G"
                 METHOD="precond-newton-cg"
             else
-                # Full strategy is slower
-                time="12:00:00"
-                mem="16G"
+                # Full strategy is slower and needs more memory for large n
+                time="24:00:00"
+                mem="32G"
                 METHOD="newton-cg"  # No preconditioning for full
             fi
             cpus="4"
