@@ -1897,20 +1897,20 @@ def constrained_decomposition(
             raise ValueError(f"x_init has wrong shape: {x_init.shape[0]} != {m}")
 
         # Try shrinking x_init until M = A - C(x) is SPD
-        alpha = 1.0
+        shrink_factor = 1.0
         x = None
         for _ in range(20):  # max 20 shrink attempts
-            x_try = alpha * x_init
+            x_try = shrink_factor * x_init
             C_try = basis.build_C(x_try)
             M_try = A - C_try
             if is_spd(M_try):
                 x = x_try
-                if verbose and alpha < 1.0:
-                    print(f"{pfx}[Warm start] shrunk to alpha={alpha:.4f}")
+                if verbose and shrink_factor < 1.0:
+                    print(f"{pfx}[Warm start] shrunk to {shrink_factor:.4f}")
                 elif verbose:
-                    print(f"{pfx}[Warm start] using x_init directly (alpha=1.0)")
+                    print(f"{pfx}[Warm start] using x_init directly")
                 break
-            alpha *= 0.5
+            shrink_factor *= 0.5
 
         if x is None:
             # Fall back to zeros if shrinking didn't help
