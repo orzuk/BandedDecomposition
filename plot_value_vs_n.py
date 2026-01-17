@@ -121,7 +121,7 @@ def plot_value_vs_n(
 
         ax.set_xlabel(r'$n$', fontsize=12)
         if ax_idx == 0:
-            ax.set_ylabel(r'$v_N^*$', fontsize=12)
+            ax.set_ylabel(r'$\mathit{v}_N^*$', fontsize=12)
         ax.set_title(strategy_label, fontsize=12)
         ax.grid(True, alpha=0.3)
 
@@ -203,7 +203,7 @@ def plot_single_H_all_strategies(
                    label=label, markersize=8, linewidth=2)
 
     ax.set_xlabel(r'$n$', fontsize=14)
-    ax.set_ylabel(r'$v_N^*$', fontsize=14)
+    ax.set_ylabel(r'$\mathit{v}_N^*$', fontsize=14)
 
     if show_title:
         alpha_str = f", α={alpha}" if model == 'mixed_fbm' else ""
