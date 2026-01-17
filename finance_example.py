@@ -1476,8 +1476,8 @@ if __name__ == "__main__":
                         help="Maximum condition number for Sigma matrix. Skip H values exceeding this (default: 1e6).")
     parser.add_argument("--cg-max-iter", type=int, default=500,
                         help="Maximum CG iterations for newton-cg solver (default: 500).")
-    parser.add_argument("--tol", type=float, default=1e-6,
-                        help="Convergence tolerance for optimization (default: 1e-6). "
+    parser.add_argument("--tol", type=float, default=1e-8,
+                        help="Convergence tolerance for optimization (default: 1e-8). "
                              "Try 1e-4 for faster but less precise results.")
     parser.add_argument("--sort-h-by-center", action="store_true",
                         help="Sort H values by distance from 0.5 (start with easier cases near center). "
