@@ -168,6 +168,7 @@ python finance_example.py \\
     --sort-h-by-center \\
     --tol \${TOL} \\
     --cg-max-iter \${CG_MAX} \\
+    --warm-start \\
     --verbose
 
 echo ""

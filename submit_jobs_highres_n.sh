@@ -110,6 +110,7 @@ for n in ${N_VALUES[*]}; do
         --max-cond 1e8 \\
         --tol 1e-6 \\
         --cg-max-iter 500 \\
+        --warm-start \\
         --verbose
 done
 
