@@ -1513,10 +1513,10 @@ if __name__ == "__main__":
     incremental = args.incremental
     dry_run = args.dry_run
 
-    # Dry run implies force rerun and no incremental
+    # Dry run: use incremental code path (has warm start, verbose) but skip saving
+    # Don't set force_rerun=True as that would use the batch path without warm start
     if dry_run:
-        force_rerun = True
-        incremental = False
+        incremental = True  # Use incremental path for warm start support
     warm_start = args.warm_start
     max_cond = args.max_cond
     cg_max_iter = args.cg_max_iter
@@ -1673,10 +1673,14 @@ if __name__ == "__main__":
         print(f"Results file: {results_file}")
         print(f"{'='*60}\n")
 
-        # Load already computed H values
-        completed_H = get_completed_H_values(model_type, n, alpha, strategy)
-        if completed_H:
-            print(f"Found {len(completed_H)} already computed H values")
+        # Load already computed H values (skip for dry run - recompute everything)
+        if dry_run:
+            completed_H = set()
+            print(f"[Dry run] Forcing recomputation of all H values")
+        else:
+            completed_H = get_completed_H_values(model_type, n, alpha, strategy)
+            if completed_H:
+                print(f"Found {len(completed_H)} already computed H values")
 
         run_markovian = strategy in ("both", "markovian")
         run_full = strategy in ("both", "full")
