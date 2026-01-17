@@ -72,34 +72,34 @@ def plot_value_vs_n(
     else:
         colors = [cmap(0.5)]
 
-    # Line styles for strategies
-    styles = {
-        'value_sum': {'linestyle': ':', 'marker': 's', 'label': 'Sum'},
-        'value_markovian': {'linestyle': '-', 'marker': 'o', 'label': 'Markovian'},
-        'value_full': {'linestyle': '--', 'marker': '^', 'label': 'Full'},
-    }
+    # Strategies to plot (one subplot each)
+    strategies = [
+        ('value_sum', 'Sum'),
+        ('value_markovian', 'Markovian'),
+        ('value_full', 'Full'),
+    ]
 
-    # Create figure
-    fig, ax = plt.subplots(figsize=(10, 7))
+    # Create figure with 3 subplots (one per strategy)
+    fig, axes = plt.subplots(1, 3, figsize=(14, 5), sharey=True)
 
-    for h_idx, H in enumerate(H_values):
-        # Get data for this H (with tolerance for float comparison)
-        h_mask = np.isclose(df_filtered['H'], H, atol=0.005)
-        df_h = df_filtered[h_mask]
+    for ax_idx, (strategy_col, strategy_label) in enumerate(strategies):
+        ax = axes[ax_idx]
 
-        if df_h.empty:
-            print(f"  No data for H={H}")
-            continue
+        for h_idx, H in enumerate(H_values):
+            # Get data for this H (with tolerance for float comparison)
+            h_mask = np.isclose(df_filtered['H'], H, atol=0.005)
+            df_h = df_filtered[h_mask]
 
-        # Group by n and get the value (take first if duplicates)
-        for strategy, style in styles.items():
+            if df_h.empty:
+                continue
+
             n_list = []
             val_list = []
 
             for n in n_values:
                 df_n = df_h[df_h['n'] == n]
                 if not df_n.empty:
-                    val = df_n[strategy].iloc[0]
+                    val = df_n[strategy_col].iloc[0]
                     if pd.notna(val) and val != '':
                         try:
                             n_list.append(n)
@@ -108,47 +108,27 @@ def plot_value_vs_n(
                             pass
 
             if n_list:
-                # Only add label for first H value to avoid legend clutter
-                if h_idx == 0:
-                    label = f"{style['label']}"
-                else:
-                    label = None
-
                 ax.plot(
                     n_list, val_list,
-                    linestyle=style['linestyle'],
-                    marker=style['marker'],
+                    linestyle='-',
+                    marker='o',
                     color=colors[h_idx],
-                    label=label,
-                    markersize=6,
+                    label=f'H={H}' if ax_idx == 0 else None,
+                    markersize=5,
                     linewidth=1.5,
                     alpha=0.8,
                 )
 
-    # Add H value legend (color patches)
+        ax.set_xlabel(r'$n$', fontsize=12)
+        if ax_idx == 0:
+            ax.set_ylabel(r'$v_N^*$', fontsize=12)
+        ax.set_title(strategy_label, fontsize=12)
+        ax.grid(True, alpha=0.3)
+
+    # Add single legend for H values (on first subplot)
     from matplotlib.patches import Patch
     h_patches = [Patch(color=colors[i], label=f'H={H_values[i]}') for i in range(len(H_values))]
-
-    # Create two legends (smaller font)
-    legend1 = ax.legend(handles=h_patches, loc='upper left', title=r'$\mathcal{H}$',
-                        fontsize=8, title_fontsize=9, framealpha=0.8)
-    ax.add_artist(legend1)
-
-    # Strategy legend (from plot)
-    handles, labels = ax.get_legend_handles_labels()
-    if handles:
-        ax.legend(handles[:3], labels[:3], loc='upper right', title='Strategy',
-                  fontsize=8, title_fontsize=9, framealpha=0.8)
-
-    ax.set_xlabel(r'$n$', fontsize=14)
-    ax.set_ylabel(r'$v_N^*$', fontsize=14)
-
-    if show_title:
-        alpha_str = f", α={alpha}" if model == 'mixed_fbm' else ""
-        ax.set_title(f'Investment Value vs Matrix Size ({model}{alpha_str})', fontsize=14)
-
-    ax.grid(True, alpha=0.3)
-    ax.set_xscale('linear')
+    axes[0].legend(handles=h_patches, loc='upper left', fontsize=8, framealpha=0.8)
 
     # Save figure
     output_dir = Path(output_dir)
