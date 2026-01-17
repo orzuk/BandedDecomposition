@@ -64,9 +64,13 @@ def plot_value_vs_n(
     n_values = sorted(df_filtered['n'].unique())
     print(f"Available n values: {n_values}")
 
-    # Colors for H values
-    cmap = plt.cm.viridis
-    colors = [cmap(i / (len(H_values) - 1)) for i in range(len(H_values))]
+    # Colors for H values: blue to red colormap
+    cmap = plt.cm.coolwarm
+    # Map H values to colormap positions (lowest H -> blue, highest H -> red)
+    if len(H_values) > 1:
+        colors = [cmap(i / (len(H_values) - 1)) for i in range(len(H_values))]
+    else:
+        colors = [cmap(0.5)]
 
     # Line styles for strategies
     styles = {
