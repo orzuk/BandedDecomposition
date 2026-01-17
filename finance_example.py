@@ -1470,6 +1470,8 @@ if __name__ == "__main__":
                         help="Minimum H for plotting (default: use hmin). Filters cached data for plotting.")
     parser.add_argument("--plot-hmax", type=float, default=None,
                         help="Maximum H for plotting (default: use hmax). Filters cached data for plotting.")
+    parser.add_argument("--show-title", action="store_true",
+                        help="Show title on plots (default: no title)")
     parser.add_argument("--incremental", action="store_true",
                         help="Save results incrementally after each H value. Resume from existing results.")
     parser.add_argument("--max-cond", type=float, default=1e6,
@@ -1513,6 +1515,7 @@ if __name__ == "__main__":
     plot_all = args.plot_all
     plot_hmin = args.plot_hmin
     plot_hmax = args.plot_hmax
+    show_title = args.show_title
     incremental = args.incremental
     dry_run = args.dry_run
 
@@ -1629,27 +1632,33 @@ if __name__ == "__main__":
                 continue
 
             # Create plot
-            plt.figure(figsize=(8, 5))
+            fig, ax = plt.subplots(figsize=(8, 5))
             if has_markov:
-                plt.plot(H_plot, val_markov_plot, 'b-o', label="Markovian strategy", markersize=4)
+                ax.plot(H_plot, val_markov_plot, 'b-o', label="Markovian", markersize=4)
             if has_general:
-                plt.plot(H_plot, val_general_plot, 'r-s', label="Full-information strategy", markersize=4)
+                ax.plot(H_plot, val_general_plot, 'r-s', label="Full-information", markersize=4)
             if has_sum:
-                plt.plot(H_plot, val_sum_plot, 'g-^', label="Sum strategy (no decomp)", markersize=4)
-            plt.xlabel("Hurst parameter H", fontsize=12)
-            plt.ylabel("log(Value)", fontsize=12)
+                ax.plot(H_plot, val_sum_plot, 'g-^', label="Sum (no decomp)", markersize=4)
+            ax.set_xlabel(r'$\mathcal{H}$', fontsize=14)
+            ax.set_ylabel(r'$v_N^*$', fontsize=14)
 
             if model_i == "mixed_fbm":
                 N_i = n_i // 2
-                plt.title(f"Mixed fBM: Strategy value vs H (N={N_i}, α={alpha_i})", fontsize=13)
+                if show_title:
+                    ax.set_title(f"Mixed fBM: Strategy value vs H (N={N_i}, α={alpha_i})", fontsize=13)
+                # Add H=3/4 vertical line (no legend entry) with text at top
                 if H_plot[0] <= 0.75 <= H_plot[-1]:
-                    plt.axvline(x=0.75, color='gray', linestyle='--', alpha=0.5, label='H=3/4 (arbitrage-free boundary)')
+                    ax.axvline(x=0.75, color='gray', linestyle='--', alpha=0.5)
+                    # Add "0.75" text at top of plot area
+                    ax.text(0.75, 1.02, '0.75', transform=ax.get_xaxis_transform(),
+                           ha='center', va='bottom', fontsize=10, color='gray')
             else:
-                plt.title(f"fBM: Strategy value vs H (n={n_i})", fontsize=13)
+                if show_title:
+                    ax.set_title(f"fBM: Strategy value vs H (n={n_i})", fontsize=13)
 
-            plt.legend()
-            plt.grid(True, alpha=0.3)
-            plt.tight_layout()
+            ax.legend(fontsize=9, framealpha=0.8)
+            ax.grid(True, alpha=0.3)
+            fig.tight_layout()
 
             # Save figure
             fig_dir = here / "figs" / model_i
@@ -1660,8 +1669,8 @@ if __name__ == "__main__":
             h_range_str = f"H_{hmin_str}_{hmax_str}"
             alpha_str = f"_a{alpha_i:.1f}" if model_i == "mixed_fbm" and alpha_i != 1.0 else ""
             out_png = fig_dir / f"value_{model_i}_n_{n_i}_{h_range_str}{alpha_str}_all.png"
-            plt.savefig(out_png, dpi=150)
-            plt.close()
+            fig.savefig(out_png, dpi=150)
+            plt.close(fig)
             print(f"  Saved: {out_png}")
             n_plotted += 1
 
@@ -1919,9 +1928,9 @@ if __name__ == "__main__":
 
         # --- Plot ---
         # Use filled markers for computed values, empty markers for missing values
-        plt.figure(figsize=(8, 5))
+        fig, ax = plt.subplots(figsize=(8, 5))
 
-        def plot_with_missing(H, vals, color, marker, label):
+        def plot_with_missing(ax, H, vals, color, marker, label):
             """Plot computed values with filled markers, missing with empty markers."""
             if vals is None:
                 return
@@ -1930,7 +1939,7 @@ if __name__ == "__main__":
 
             # Computed values: filled markers with line
             if np.any(computed_mask):
-                plt.plot(H[computed_mask], vals[computed_mask],
+                ax.plot(H[computed_mask], vals[computed_mask],
                         color=color, linestyle='-', marker=marker,
                         markersize=5, label=label, markerfacecolor=color)
 
@@ -1938,26 +1947,30 @@ if __name__ == "__main__":
             if np.any(missing_mask):
                 # Use small y value to show missing points at bottom
                 y_missing = np.zeros(np.sum(missing_mask))
-                plt.plot(H[missing_mask], y_missing,
+                ax.plot(H[missing_mask], y_missing,
                         color=color, linestyle='', marker=marker,
                         markersize=5, markerfacecolor='none', markeredgecolor=color,
                         alpha=0.5, label=f'{label} (missing)' if np.any(computed_mask) else label)
 
-        plot_with_missing(H_plot, val_markov_plot, 'blue', 'o', 'Markovian')
-        plot_with_missing(H_plot, val_general_plot, 'red', 's', 'Full-information')
-        plot_with_missing(H_plot, val_sum_plot, 'green', '^', 'Sum (no decomp)')
-        plt.xlabel("Hurst parameter H", fontsize=12)
-        plt.ylabel("log(Value)", fontsize=12)
+        plot_with_missing(ax, H_plot, val_markov_plot, 'blue', 'o', 'Markovian')
+        plot_with_missing(ax, H_plot, val_general_plot, 'red', 's', 'Full-information')
+        plot_with_missing(ax, H_plot, val_sum_plot, 'green', '^', 'Sum (no decomp)')
+        ax.set_xlabel(r'$\mathcal{H}$', fontsize=14)
+        ax.set_ylabel(r'$v_N^*$', fontsize=14)
         if model_type == "mixed_fbm":
-            plt.title(f"Mixed fBM: Strategy value vs H (N={N}, α={alpha})", fontsize=13)
-            # Only show H=3/4 line if it's in the plotted range
+            if show_title:
+                ax.set_title(f"Mixed fBM: Strategy value vs H (N={N}, α={alpha})", fontsize=13)
+            # Add H=3/4 vertical line (no legend entry) with text at top
             if H_plot[0] <= 0.75 <= H_plot[-1]:
-                plt.axvline(x=0.75, color='gray', linestyle='--', alpha=0.5, label='H=3/4 (arbitrage-free boundary)')
+                ax.axvline(x=0.75, color='gray', linestyle='--', alpha=0.5)
+                ax.text(0.75, 1.02, '0.75', transform=ax.get_xaxis_transform(),
+                       ha='center', va='bottom', fontsize=10, color='gray')
         else:
-            plt.title(f"fBM: Strategy value vs H (n={n})", fontsize=13)
-        plt.legend()
-        plt.grid(True, alpha=0.3)
-        plt.tight_layout()
+            if show_title:
+                ax.set_title(f"fBM: Strategy value vs H (n={n})", fontsize=13)
+        ax.legend(fontsize=9, framealpha=0.8)
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
 
         # --- Save in figs/ next to this script ---
         here = Path(__file__).resolve().parent
@@ -1970,7 +1983,8 @@ if __name__ == "__main__":
         h_range_str = f"H_{hmin_str}_{hmax_str}"
         alpha_str = f"_a{alpha:.1f}" if model_type == "mixed_fbm" and alpha != 1.0 else ""
         out_png = fig_dir / f"value_{model_type}_n_{n}_{h_range_str}{alpha_str}_{strategy}.png"
-        plt.savefig(out_png, dpi=150)
+        fig.savefig(out_png, dpi=150)
+        plt.close(fig)
         print(f"\nSaved value figure to: {out_png}")
 
 

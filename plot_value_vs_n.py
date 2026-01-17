@@ -23,6 +23,7 @@ def plot_value_vs_n(
     H_values: list = None,
     output_dir: str = "figs",
     show_plot: bool = False,
+    show_title: bool = False,
 ):
     """
     Plot value vs n for selected H values.
@@ -124,20 +125,23 @@ def plot_value_vs_n(
     from matplotlib.patches import Patch
     h_patches = [Patch(color=colors[i], label=f'H={H_values[i]}') for i in range(len(H_values))]
 
-    # Create two legends
-    legend1 = ax.legend(handles=h_patches, loc='upper left', title='Hurst parameter')
+    # Create two legends (smaller font)
+    legend1 = ax.legend(handles=h_patches, loc='upper left', title=r'$\mathcal{H}$',
+                        fontsize=8, title_fontsize=9, framealpha=0.8)
     ax.add_artist(legend1)
 
     # Strategy legend (from plot)
     handles, labels = ax.get_legend_handles_labels()
     if handles:
-        ax.legend(handles[:3], labels[:3], loc='upper right', title='Strategy')
+        ax.legend(handles[:3], labels[:3], loc='upper right', title='Strategy',
+                  fontsize=8, title_fontsize=9, framealpha=0.8)
 
-    ax.set_xlabel('n (matrix size)', fontsize=12)
-    ax.set_ylabel('Investment Value', fontsize=12)
+    ax.set_xlabel(r'$n$', fontsize=14)
+    ax.set_ylabel(r'$v_N^*$', fontsize=14)
 
-    alpha_str = f", α={alpha}" if model == 'mixed_fbm' else ""
-    ax.set_title(f'Investment Value vs Matrix Size ({model}{alpha_str})', fontsize=14)
+    if show_title:
+        alpha_str = f", α={alpha}" if model == 'mixed_fbm' else ""
+        ax.set_title(f'Investment Value vs Matrix Size ({model}{alpha_str})', fontsize=14)
 
     ax.grid(True, alpha=0.3)
     ax.set_xscale('linear')
@@ -167,6 +171,7 @@ def plot_single_H_all_strategies(
     H: float = 0.5,
     output_dir: str = "figs",
     show_plot: bool = False,
+    show_title: bool = False,
 ):
     """
     Plot value vs n for a single H value, showing all strategies clearly.
@@ -213,13 +218,14 @@ def plot_single_H_all_strategies(
             ax.plot(n_list, val_list, marker=marker, linestyle=ls, color=color,
                    label=label, markersize=8, linewidth=2)
 
-    ax.set_xlabel('n (matrix size)', fontsize=12)
-    ax.set_ylabel('Investment Value', fontsize=12)
+    ax.set_xlabel(r'$n$', fontsize=14)
+    ax.set_ylabel(r'$v_N^*$', fontsize=14)
 
-    alpha_str = f", α={alpha}" if model == 'mixed_fbm' else ""
-    ax.set_title(f'Investment Value vs n (H={H}{alpha_str})', fontsize=14)
+    if show_title:
+        alpha_str = f", α={alpha}" if model == 'mixed_fbm' else ""
+        ax.set_title(f'Investment Value vs n (H={H}{alpha_str})', fontsize=14)
 
-    ax.legend(loc='best', fontsize=11)
+    ax.legend(loc='best', fontsize=9, framealpha=0.8)
     ax.grid(True, alpha=0.3)
 
     # Save
@@ -255,6 +261,8 @@ if __name__ == "__main__":
                        help="Output directory for figures")
     parser.add_argument("--show", action="store_true",
                        help="Show plot interactively")
+    parser.add_argument("--show-title", action="store_true",
+                       help="Show title on plots (default: no title)")
     parser.add_argument("--all-alpha", action="store_true",
                        help="Generate plots for all alpha values")
 
@@ -276,6 +284,7 @@ if __name__ == "__main__":
                 H=args.single_H,
                 output_dir=args.output_dir,
                 show_plot=args.show,
+                show_title=args.show_title,
             )
         else:
             plot_value_vs_n(
@@ -285,4 +294,5 @@ if __name__ == "__main__":
                 H_values=args.H,
                 output_dir=args.output_dir,
                 show_plot=args.show,
+                show_title=args.show_title,
             )
