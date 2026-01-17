@@ -62,8 +62,8 @@ def plot_value_vs_n(
         print(f"No data found for model={model}, alpha={alpha}")
         return
 
-    # Get available n values
-    n_values = sorted(df_filtered['n'].unique())
+    # Get available n values (only multiples of 100 for clean plots)
+    n_values = sorted([n for n in df_filtered['n'].unique() if n % 100 == 0])
     print(f"Available n values: {n_values}")
 
     # Colors for H values: blue to red colormap
