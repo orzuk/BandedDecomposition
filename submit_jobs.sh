@@ -137,7 +137,7 @@ conda activate ${CONDA_ENV}
 
 echo "Starting job: ${job_name}"
 echo "Parameters: model=${model}, n=${n}, alpha=${alpha}, strategy=${strategy}"
-echo "H range: ${HMIN} to ${HMAX} (step ${HRES})"
+echo "H range: ${HMIN} to ${HMAX} (step ${HRES}), sorted for warm start"
 echo "Time: \$(date)"
 echo ""
 

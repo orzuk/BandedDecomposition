@@ -1480,8 +1480,11 @@ if __name__ == "__main__":
                         help="Convergence tolerance for optimization (default: 1e-8). "
                              "Try 1e-4 for faster but less precise results.")
     parser.add_argument("--sort-h-by-center", action="store_true",
-                        help="Sort H values by distance from 0.5 (start with easier cases near center). "
-                             "Useful when convergence is slow at extreme H values.")
+                        help="Sort H values for optimal warm start: 0.5->1 (ascending), then 0.5->0 (descending). "
+                             "Enables warm start to build from well-conditioned center outward.")
+    parser.add_argument("--reverse-h", action="store_true",
+                        help="Process H values in descending order (hmax to hmin). "
+                             "Useful for warm start when going from 0.5 down to 0.")
     parser.add_argument("--verbose", action="store_true",
                         help="Enable verbose output from optimization solvers (show iteration progress).")
     parser.add_argument("--heatmap", action="store_true",
@@ -1522,6 +1525,7 @@ if __name__ == "__main__":
     cg_max_iter = args.cg_max_iter
     tol = args.tol
     sort_h_by_center = args.sort_h_by_center
+    reverse_h = args.reverse_h
     verbose_solver = args.verbose
 
     if workers is None:
@@ -1532,13 +1536,25 @@ if __name__ == "__main__":
     h_start = max(hmin, hres) if hmin == 0.0 else hmin
     H_vec = np.arange(h_start, hmax, hres)
 
-    # Optionally sort H values by distance from 0.5 (start with easier cases)
+    # Optionally sort H values for optimal warm start: 0.5->1, then 0.5->0
     if sort_h_by_center:
-        # Sort by distance from 0.5, so we start with H near 0.5 (well-conditioned)
-        # and move outward to extreme values (H near 0 or 1)
-        H_vec = H_vec[np.argsort(np.abs(H_vec - 0.5))]
-        print(f"H values sorted by distance from 0.5:")
-        print(f"  Order: {', '.join([f'{h:.2f}' for h in H_vec[:10]])}{'...' if len(H_vec) > 10 else ''}")
+        # Split into upper (H >= 0.5) and lower (H < 0.5) parts
+        # Upper: sorted ascending (0.5, 0.6, ..., 1.0) - warm start builds up
+        # Lower: sorted descending (0.49, 0.48, ..., 0.01) - warm start builds down
+        upper = np.sort(H_vec[H_vec >= 0.5])  # ascending
+        lower = np.sort(H_vec[H_vec < 0.5])[::-1]  # descending
+        H_vec = np.concatenate([upper, lower])
+        print(f"H values sorted for warm start (0.5->1, then 0.5->0):")
+        if len(H_vec) <= 12:
+            print(f"  Order: {', '.join([f'{h:.2f}' for h in H_vec])}")
+        else:
+            print(f"  Order: {', '.join([f'{h:.2f}' for h in H_vec[:5]])}, ..., "
+                  f"{', '.join([f'{h:.2f}' for h in H_vec[-5:]])}")
+
+    # Optionally reverse H values (for warm start going from 0.5 down to 0)
+    if reverse_h:
+        H_vec = H_vec[::-1]
+        print(f"H values reversed (descending): {H_vec[0]:.2f} -> {H_vec[-1]:.2f}")
 
     if model_type == "fbm":
         N = n
