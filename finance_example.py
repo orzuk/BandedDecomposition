@@ -1513,9 +1513,9 @@ if __name__ == "__main__":
     incremental = args.incremental
     dry_run = args.dry_run
 
-    # Dry run: use incremental code path (has warm start, verbose) but skip saving
-    # Don't set force_rerun=True as that would use the batch path without warm start
-    if dry_run:
+    # Both dry_run and force_rerun should use incremental code path (has warm start, verbose)
+    # They just differ in whether results are saved
+    if dry_run or force_rerun:
         incremental = True  # Use incremental path for warm start support
     warm_start = args.warm_start
     max_cond = args.max_cond
@@ -1673,10 +1673,11 @@ if __name__ == "__main__":
         print(f"Results file: {results_file}")
         print(f"{'='*60}\n")
 
-        # Load already computed H values (skip for dry run - recompute everything)
-        if dry_run:
+        # Load already computed H values (skip for dry_run/force_rerun - recompute everything)
+        if dry_run or force_rerun:
             completed_H = set()
-            print(f"[Dry run] Forcing recomputation of all H values")
+            mode = "Dry run" if dry_run else "Force rerun"
+            print(f"[{mode}] Forcing recomputation of all H values")
         else:
             completed_H = get_completed_H_values(model_type, n, alpha, strategy)
             if completed_H:
