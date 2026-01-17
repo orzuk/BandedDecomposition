@@ -137,7 +137,7 @@ def plot_value_vs_n(
                   fontsize=8, title_fontsize=9, framealpha=0.8)
 
     ax.set_xlabel(r'$n$', fontsize=14)
-    ax.set_ylabel(r'$v_N^*$', fontsize=14)
+    ax.set_ylabel(r'$v_n^*$', fontsize=14)
 
     if show_title:
         alpha_str = f", α={alpha}" if model == 'mixed_fbm' else ""
@@ -219,7 +219,7 @@ def plot_single_H_all_strategies(
                    label=label, markersize=8, linewidth=2)
 
     ax.set_xlabel(r'$n$', fontsize=14)
-    ax.set_ylabel(r'$v_N^*$', fontsize=14)
+    ax.set_ylabel(r'$v_n^*$', fontsize=14)
 
     if show_title:
         alpha_str = f", α={alpha}" if model == 'mixed_fbm' else ""
